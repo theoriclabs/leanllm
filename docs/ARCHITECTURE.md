@@ -2,6 +2,8 @@
 
 `leanllm` is a Lean 4 client library for large language model APIs, built on [`LeanHttp`](https://github.com/theoriclabs/leanhttp) (`v0.6.0`) and `Lean.Data.Json`. The library totals 1,680 lines of Lean across 12 library modules and one executable test runner (`Main.lean`).
 
+See [README.md](../README.md) for quick-start usage and [EXAMPLES.md](EXAMPLES.md) for multi-turn agent loops, vision inputs, multi-model pipelines, cloud providers, and error recovery.
+
 ## Design overview
 
 Most multi-provider LLM clients conflate the model family, the hosting service, and the wire protocol. In practice these three vary independently:

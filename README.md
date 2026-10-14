@@ -4,11 +4,7 @@
 
 [![Lean](https://img.shields.io/badge/Lean-v4.34.1-555555)](https://lean-lang.org)
 
-`leanllm` provides a single typed interface across Anthropic Claude, OpenAI, and Google Gemini models over direct vendor endpoints, OpenRouter, AWS Bedrock, Azure OpenAI, Google Vertex AI, and custom OpenAI/Anthropic-compatible servers.
-
-`ModelConfig` separates the model family (`Model`), the hosting service (`Provider`), and the JSON wire dialect (`WireApi`). `WireApi.auto` selects the provider's default schema for a given model, while an explicit `WireApi` overrides the wire format per call (such as running OpenAI's `/v1/responses` or Anthropic's `/v1/messages` through OpenRouter). Conversations carry text, URL and base64 images, tool declarations (`ToolSpec`), tool calls (`ToolCall`), tool results (`ToolResult`), and reasoning traces (`ContentPart.thinking`). Requests run synchronously or stream incrementally over Server-Sent Events via `LeanHttp.Sse`, with transport faults, HTTP status codes, `Retry-After` headers, and schema mismatches mapped into a closed `LLMError` sum type.
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the module dependency graph, request pipeline, and wire codec internals.
+`leanllm` provides a single typed interface for Anthropic Claude, OpenAI, and Google Gemini models across direct vendor APIs, OpenRouter, AWS Bedrock, Azure OpenAI, Google Vertex AI, and local OpenAI-compatible servers.
 
 ## Install
 
@@ -25,6 +21,10 @@ Requires Lean `v4.34.1` and `libcurl` at runtime (loaded dynamically by `leanhtt
 
 ## Quick start
 
+### 1. Ask a single question
+
+Set `ANTHROPIC_API_KEY` in your environment and run a prompt with `LLMM.run` and `ask`:
+
 ```lean
 import Leanllm
 
@@ -40,93 +40,84 @@ def main : IO Unit := do
   | .error err => IO.eprintln s!"Error: {repr err}"
 ```
 
-`LLMM.run` opens a `LeanHttp.Session`, executes the `LLMM` action, and closes the session on exit. For a single stateless call without `LLMM`, use `Leanllm.call` or `Leanllm.callStream`:
+### 2. Multi-turn conversation
 
-```lean
-def oneShot : IO Unit := do
-  let cfg : ModelConfig := { model := .gemini .flash35, maxTokens := some 128 }
-  match ← (Leanllm.call cfg [Message.user "What is 2 + 2?"]).run with
-  | .ok resp   => IO.println resp.text
-  | .error err => IO.eprintln s!"Error: {repr err}"
-```
-
-## Configuration: `Model`, `Provider`, and `WireApi`
-
-`ModelConfig` configures the target model, hosting provider, wire protocol, sampling parameters, and tool specifications:
-
-```lean
-structure ModelConfig where
-  model       : Model
-  provider    : Provider      := .direct
-  wireApi     : WireApi       := .auto
-  temperature : Option Float  := none
-  maxTokens   : Option Nat    := none
-  topP        : Option Float  := none
-  stop        : List String   := []
-  tools       : List ToolSpec := []
-  apiKey      : Option String := none
-  baseUrl     : Option String := none
-```
-
-### Models
-
-| Family | Constructor | Built-in variants |
-| --- | --- | --- |
-| Anthropic Claude | `Model.claude` | `.opus55`, `.sonnet55`, `.haiku55`, `.fable51`, `.opus5`, `.sonnet5`, `.opus45`, `.sonnet45`, `.haiku45`, `.custom id` |
-| OpenAI | `Model.openai` | `.gpt56Sol`, `.gpt54`, `.gpt4o`, `.gpt4oMini`, `.o3`, `.o4Mini`, `.custom id` |
-| Google Gemini | `Model.gemini` | `.argon4`, `.flash38`, `.flash35`, `.pro25`, `.flash25`, `.custom id` |
-
-### Providers and credentials
-
-When `ModelConfig.apiKey` is `none`, `leanllm` reads the corresponding environment variable:
-
-| Provider | Configuration | Environment variables | Default `WireApi` |
-| --- | --- | --- | --- |
-| `.direct` | Native vendor API | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) | `.anthropicMessages` / `.openaiChat` / `.geminiGenerate` |
-| `.openRouter cfg` | `OpenRouterConfig` (fallbacks, provider order, sort by `.price` / `.throughput` / `.latency`) | `OPENROUTER_API_KEY` | `.openaiChat` |
-| `.bedrock cfg` | `BedrockConfig` (`region`, `crossRegion`) | `AWS_BEARER_TOKEN_BEDROCK`, `BEDROCK_API_KEY` | `.bedrockConverse` |
-| `.azure cfg` | `AzureConfig` (`endpoint`, `deployment`, `apiVersion`) | `AZURE_OPENAI_API_KEY`, `OPENAI_API_KEY` | `.openaiChat` |
-| `.vertex cfg` | `VertexConfig` (`projectId`, `location`) | `VERTEX_API_KEY`, `GOOGLE_ACCESS_TOKEN` | `.anthropicMessages` (Claude) / `.geminiGenerate` (Gemini) |
-| `.custom baseUrl` | Custom base URL | `LLM_API_KEY`, `OPENAI_API_KEY` (optional) | `.openaiChat` |
-
-### Switching providers and wire APIs in `LLMM`
-
-Inside an `LLMM` block, `LLMM.withProvider`, `LLMM.withModel`, and `LLMM.withWireApi` override the context locally while reusing the same `LeanHttp.Session`:
+Pass a list of `Message` values to `completion` to inspect the full `LLMResponse` (assistant text, stop reason, and token usage):
 
 ```lean
 import Leanllm
 
 open Leanllm
 
-def multiCall : LLMM (String × String) := do
-  -- Uses the base config from LLMM.run
-  let a ← ask "Give one word for fast."
-  -- Switch to OpenRouter with the OpenAI Responses wire dialect for a sub-computation
-  let b ← LLMM.withProvider (.openRouter { appName := some "my-app" }) <|
-          LLMM.withModel (.openai .gpt4oMini) <|
-          LLMM.withWireApi .openaiResponses <|
-            ask "Give one word for slow."
-  return (a, b)
+def chat : IO Unit := do
+  let cfg : ModelConfig := {
+    model       := .openai .gpt4oMini
+    temperature := some 0.2
+    maxTokens   := some 256
+  }
+  let messages := [
+    Message.system "Reply in at most two sentences.",
+    Message.user "What is Lean 4?",
+    Message.assistant "Lean 4 is a functional programming language and interactive theorem prover.",
+    Message.user "What logic is its kernel based on?"
+  ]
+  match ← LLMM.run cfg (completion messages) with
+  | .ok resp =>
+    IO.println resp.text
+    if let some u := resp.usage then
+      IO.println s!"(tokens: {u.inputTokens} in, {u.outputTokens} out)"
+  | .error err =>
+    IO.eprintln s!"Error: {repr err}"
 ```
 
-## Messages, multimodal content, and tool calling
+### 3. Stream tokens over Server-Sent Events
 
-Conversations are lists of `Message` values. Each `Message` has a `Role` (`.system`, `.developer`, `.user`, `.assistant`, `.tool`) and a `List ContentPart`:
+Use `askStream` (or `completionStream` for multi-turn history) to receive each text chunk as it arrives:
 
 ```lean
-inductive ContentPart where
-  | text       (text : String)
-  | image      (source : ImageSource)
-  | toolCall   (call : ToolCall)
-  | toolResult (result : ToolResult)
-  | thinking   (thought : String) (signature : Option String := none)
+import Leanllm
+
+open Leanllm
+
+def stream : IO Unit := do
+  let cfg : ModelConfig := { model := .gemini .flash35, maxTokens := some 256 }
+  match ← LLMM.run cfg (askStream "Count from 1 to 5." IO.print) with
+  | .ok _      => IO.println ""
+  | .error err => IO.eprintln s!"\nStream error: {repr err}"
 ```
 
-Helper constructors cover common cases: `Message.system`, `Message.developer`, `Message.user`, `Message.assistant`, and `Message.toolResult`.
+### 4. Switch models and providers
 
-### Tool declarations and tool calls
+`ModelConfig` separates the model (`model`), where it is hosted (`provider`), and which JSON schema goes over the wire (`wireApi`). Your calling code stays identical when you switch providers:
 
-Define tools with `ToolSpec` and inspect `resp.toolCalls` on the returned `LLMResponse`:
+```lean
+import Leanllm
+
+open Leanllm
+
+-- Direct Google Gemini (reads GEMINI_API_KEY or GOOGLE_API_KEY)
+def geminiCfg : ModelConfig :=
+  { model := .gemini .flash35, maxTokens := some 256 }
+
+-- Any model via OpenRouter (reads OPENROUTER_API_KEY)
+def openRouterCfg : ModelConfig :=
+  { model    := .claude .haiku55
+    provider := .openRouter { appName := some "my-lean-app" } }
+
+-- OpenAI /v1/responses endpoint instead of /v1/chat/completions
+def responsesCfg : ModelConfig :=
+  { model   := .openai .gpt54
+    wireApi := .openaiResponses }
+
+-- Local Ollama or vLLM server (no API key required)
+def localCfg : ModelConfig :=
+  { model    := .openai (.custom "qwen2.5-coder:7b")
+    provider := .custom "http://localhost:11434/v1" }
+```
+
+### 5. Call a tool
+
+Declare a tool with `ToolSpec` and read `resp.toolCalls` from the response:
 
 ```lean
 import Leanllm
@@ -139,16 +130,13 @@ def weatherTool : ToolSpec := {
   parameters  := Lean.Json.mkObj [
     ("type", "object"),
     ("properties", Lean.Json.mkObj [
-      ("city", Lean.Json.mkObj [
-        ("type", "string"),
-        ("description", "City name, e.g. Tokyo")
-      ])
+      ("city", Lean.Json.mkObj [("type", "string")])
     ]),
     ("required", Lean.toJson ["city"])
   ]
 }
 
-def runToolExample : IO Unit := do
+def checkWeather : IO Unit := do
   let cfg : ModelConfig := {
     model     := .claude .haiku55
     tools     := [weatherTool]
@@ -158,54 +146,63 @@ def runToolExample : IO Unit := do
   match ← LLMM.run cfg (completion msgs) with
   | .ok resp =>
     for tc in resp.toolCalls do
-      IO.println s!"Tool call: {tc.name} with args {tc.arguments.compress} (id={tc.id})"
+      IO.println s!"Call {tc.name} with {tc.arguments.compress}"
   | .error err =>
     IO.eprintln s!"Error: {repr err}"
 ```
 
-`LLMResponse` also provides `resp.text : String`, `resp.thinking : List String`, `resp.stopReason : StopReason`, and `resp.usage : Option Usage` (with `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, and `reasoningTokens`).
+### 6. One-shot call without `LLMM`
 
-## Streaming over Server-Sent Events
-
-`completionStream` and `askStream` stream text deltas over SSE and return the full concatenated string when the stream finishes:
+If you only need a single request and do not want the `LLMM` reader monad, call `Leanllm.call` or `Leanllm.callStream` directly in `ExceptT LLMError IO`:
 
 ```lean
 import Leanllm
 
 open Leanllm
 
-def streamExample : IO Unit := do
-  let cfg : ModelConfig := { model := .claude .haiku55, maxTokens := some 128 }
-  match ← LLMM.run cfg (askStream "Count from 1 to 5." fun delta => IO.print delta) with
-  | .ok _      => IO.println ""
-  | .error err => IO.eprintln s!"\nStream error: {repr err}"
+def oneShot : IO Unit := do
+  let cfg : ModelConfig := { model := .claude .haiku55, maxTokens := some 64 }
+  match ← (Leanllm.call cfg [Message.user "What is 2 + 2?"]).run with
+  | .ok resp   => IO.println resp.text
+  | .error err => IO.eprintln s!"Error: {repr err}"
 ```
 
-SSE delta extraction supports `.anthropicMessages`, `.openaiChat`, `.openaiResponses`, `.geminiGenerate` (automatically rewritten to `:streamGenerateContent?alt=sse`), `.bedrockConverse`, and `.bedrockInvoke`.
+## Supported models and providers
 
-## Error handling
+### Models
 
-Every operation fails with a typed `LLMError`:
-
-| Constructor | Sub-kind type | Common triggers |
+| Family | Constructor | Built-in variants |
 | --- | --- | --- |
-| `.auth kind msg` | `AuthErrorKind` (`.missingApiKey`, `.invalidApiKey`, `.insufficientPermissions`) | Unset API key env var, HTTP `401`, HTTP `403` |
-| `.rateLimit kind msg` | `RateLimitErrorKind` (`.requestsPerMinute (retryAfterMs : Option Nat)`, `.tokensPerMinute (retryAfterMs : Option Nat)`, `.quotaExceeded`) | HTTP `429` with parsed `Retry-After` header |
-| `.invalidRequest kind msg` | `InvalidRequestKind` (`.contextLengthExceeded`, `.unsupportedFeature`, `.invalidToolSchema`, `.malformedParameters`) | Unsupported `(Provider, Model)` pair, HTTP `400` / `422`, invalid URL or header |
-| `.network kind msg` | `NetworkErrorKind` (`.timeout`, `.dnsFailure`, `.connectionRefused`, `.tlsError`, `.transport`) | `LeanHttp` / libcurl transport failures |
-| `.provider kind msg` | `ProviderErrorKind` (`.overloaded`, `.internalError`, `.badGateway`, `.statusCode code body`) | HTTP `500`, `502`, `503`, `529`, or other non-2xx responses |
-| `.parse kind msg` | `ParseErrorKind` (`.invalidJson`, `.unexpectedSchema`, `.invalidToolArgs`) | Malformed JSON body, unexpected response structure, invalid tool argument JSON |
-| `.contentBlocked reason` | `String` | Safety or content filter rejection |
+| Anthropic Claude | `Model.claude` | `.opus55`, `.sonnet55`, `.haiku55`, `.fable51`, `.opus5`, `.sonnet5`, `.opus45`, `.sonnet45`, `.haiku45`, `.custom id` |
+| OpenAI | `Model.openai` | `.gpt56Sol`, `.gpt54`, `.gpt4o`, `.gpt4oMini`, `.o3`, `.o4Mini`, `.custom id` |
+| Google Gemini | `Model.gemini` | `.argon4`, `.flash38`, `.flash35`, `.pro25`, `.flash25`, `.custom id` |
+
+### Providers and environment variables
+
+When `ModelConfig.apiKey` is `none`, `leanllm` looks up the provider's environment variable:
+
+| Provider | Environment variables | Default `WireApi` |
+| --- | --- | --- |
+| `.direct` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) | `.anthropicMessages` / `.openaiChat` / `.geminiGenerate` |
+| `.openRouter cfg` | `OPENROUTER_API_KEY` | `.openaiChat` |
+| `.bedrock cfg` | `AWS_BEARER_TOKEN_BEDROCK`, `BEDROCK_API_KEY` | `.bedrockConverse` |
+| `.azure cfg` | `AZURE_OPENAI_API_KEY`, `OPENAI_API_KEY` | `.openaiChat` |
+| `.vertex cfg` | `VERTEX_API_KEY`, `GOOGLE_ACCESS_TOKEN` | `.anthropicMessages` (Claude) / `.geminiGenerate` (Gemini) |
+| `.custom baseUrl` | `LLM_API_KEY`, `OPENAI_API_KEY` (optional) | `.openaiChat` |
+
+## Documentation
+
+See [docs/EXAMPLES.md](docs/EXAMPLES.md) for multi-turn tool-calling agent loops, vision inputs (URL and base64 images), multi-model workflows in a single `LLMM` session, OpenRouter fallback and sorting configuration, AWS Bedrock / Azure OpenAI / Vertex AI setup, reasoning traces, and rate-limit retry recovery.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the module dependency graph, `Provider × Model × WireApi` routing rules, the 5-stage HTTP/SSE execution pipeline, wire codec internals, and `LLMError` mapping.
 
 ## Building and running the test suite
-
-Build the library and executable with Lake:
 
 ```bash
 lake build
 ```
 
-`Main.lean` runs 8 live integration checks covering direct Anthropic, direct Gemini, and OpenRouter across synchronous completions, tool calls, the OpenAI Responses wire API, and SSE streaming:
+`Main.lean` runs 8 end-to-end integration checks across direct Anthropic, direct Gemini, and OpenRouter (synchronous completions, tool calls, the OpenAI Responses wire API, and SSE streaming):
 
 ```bash
 ANTHROPIC_API_KEY=... GEMINI_API_KEY=... OPENROUTER_API_KEY=... lake exe leanllm
