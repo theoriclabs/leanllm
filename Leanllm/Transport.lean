@@ -67,9 +67,9 @@ private def extractErrorBodyMessage (rawBody : String) : (String × Option Strin
     else
       (rawBody, none)
 
-private def parseRetryAfterMs (headers : Headers) : Option Nat := do
-  let val ← headers.get? headerName!"retry-after"
-  let secs ← (toString val).trimAscii.toString.toNat?
+private def parseRetryAfterMs (resp : LeanHttp.Response) : Option Nat := do
+  let val ← resp.header? headerName!"retry-after"
+  let secs ← val.trimAscii.toString.toNat?
   some (secs * 1000)
 
 /-- Map a non-2xx `LeanHttp.Response` to a typed `LLMError`. -/
@@ -81,7 +81,7 @@ def fromHttpStatus (resp : LeanHttp.Response) : LLMError :=
   | 401 => .auth .invalidApiKey msg
   | 403 => .auth .insufficientPermissions msg
   | 429 =>
-    let retryMs := parseRetryAfterMs resp.headers
+    let retryMs := parseRetryAfterMs resp
     let isQuota := errCode.any fun c =>
       c == "insufficient_quota" || c == "quota_exceeded"
     let isTpm := errCode.any fun c =>
@@ -103,11 +103,11 @@ def fromHttpStatus (resp : LeanHttp.Response) : LLMError :=
   | 503 | 529 => .provider .overloaded msg
   | _ => .provider (.statusCode code rawBody) msg
 
-private def setValidatedHeader (req : Request) (name : Header.Name) (rawValue : String) :
+private def setHeaderOrThrow (req : Request) (name : Header.Name) (rawValue : String) :
     Except LLMError Request := do
-  let some val := Header.Value.ofString? rawValue
+  let some next := req.header? name rawValue
     | throw (.invalidRequest (.malformedParameters s!"Invalid HTTP header value for {name}") "Invalid header value")
-  return req.header name val
+  return next
 
 private def parseTarget (url : String) : Except LLMError Target := do
   let some uri := URI.parse? url
@@ -175,28 +175,28 @@ def buildHttpRequest (cfg : ModelConfig) (apiKey : String) (payload : Json) : Ex
   let mut req := (Request.post target)
     |>.json payload
     |>.header headerName!"Accept" headerValue!"application/json"
-  req := { req with timeouts := { connect := .ofNat 15000, total := .ofNat 120000 } }
+    |>.withTimeouts { connect := .ofNat 15000, total := .ofNat 120000 }
 
   match cfg.provider with
   | .direct =>
     match cfg.effectiveWireApi with
     | .anthropicMessages =>
-      req ← setValidatedHeader req headerName!"x-api-key" apiKey
+      req ← setHeaderOrThrow req headerName!"x-api-key" apiKey
       req := req.header headerName!"anthropic-version" headerValue!"2023-06-01"
     | .geminiGenerate =>
-      req ← setValidatedHeader req headerName!"x-goog-api-key" apiKey
+      req ← setHeaderOrThrow req headerName!"x-goog-api-key" apiKey
     | _ =>
       req := req.bearer apiKey
   | .openRouter orCfg =>
     req := req.bearer apiKey
     if let some referer := orCfg.siteUrl then
-      req ← setValidatedHeader req headerName!"HTTP-Referer" referer
+      req ← setHeaderOrThrow req headerName!"HTTP-Referer" referer
     if let some title := orCfg.appName then
-      req ← setValidatedHeader req headerName!"X-Title" title
+      req ← setHeaderOrThrow req headerName!"X-Title" title
   | .bedrock _ =>
     req := req.bearer apiKey
   | .azure azCfg =>
-    req ← setValidatedHeader req headerName!"api-key" apiKey
+    req ← setHeaderOrThrow req headerName!"api-key" apiKey
     req := req.param "api-version" azCfg.apiVersion
   | .vertex _ =>
     req := req.bearer apiKey
@@ -208,18 +208,28 @@ def buildHttpRequest (cfg : ModelConfig) (apiKey : String) (payload : Json) : Ex
 
 /-- Execute a `LeanHttp.Request` (optionally reusing a `LeanHttp.Session`) and decode the JSON response. -/
 def sendJson (req : Request) (session : Option Session := none) : ExceptT LLMError IO Json := do
-  let httpResult ← liftM <| match session with
-    | some s => s.request req
-    | none   => LeanHttp.request req
-  let resp ← match httpResult with
-    | .error err => throw (fromHttpError err)
-    | .ok resp   => pure resp
-  if !resp.isSuccess then
-    throw (fromHttpStatus resp)
-  let some bodyStr := String.fromUTF8? resp.body
-    | throw (.parse (.invalidJson "<non-UTF8>" "Response body is not valid UTF-8") "Response body is not valid UTF-8")
-  match Json.parse bodyStr with
-  | .ok json   => return json
-  | .error err => throw (.parse (.invalidJson bodyStr err) s!"Failed to parse JSON response: {err}")
+  let outcome : Outcome Json ← liftM <| match session with
+    | some s => s.requestAs req
+    | none   => LeanHttp.requestAs req
+  match outcome with
+  | .ok json _     => return json
+  | .status resp   => throw (fromHttpStatus resp)
+  | .decode msg r  =>
+    let raw := (String.fromUTF8? r.body).getD "<non-UTF8>"
+    throw (.parse (.invalidJson raw msg) s!"Failed to parse JSON response: {msg}")
+  | .transport err => throw (fromHttpError err)
+
+/-- Execute a streaming Server-Sent Events `LeanHttp.Request` and invoke `onEvent` for each event. -/
+def sendSse (req : Request) (session : Option Session := none)
+    (onEvent : Sse.Event → IO Unit) : ExceptT LLMError IO Unit := do
+  let req := req.header headerName!"Accept" headerValue!"text/event-stream"
+  let outcome ← liftM <| match session with
+    | some s => s.requestSse req onEvent
+    | none   => LeanHttp.requestSse req {} onEvent
+  match outcome with
+  | .ok () _       => return ()
+  | .status resp   => throw (fromHttpStatus resp)
+  | .decode msg _  => throw (.parse (.invalidJson "<sse>" msg) msg)
+  | .transport err => throw (fromHttpError err)
 
 end Leanllm.Transport
