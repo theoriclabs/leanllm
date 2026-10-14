@@ -1,0 +1,291 @@
+import Lean.Data.Json
+import LeanHttp
+import Leanllm.Auth
+
+namespace Leanllm.Auth.Other
+
+open Lean LeanHttp Std.Http
+
+private def getStr? (j : Json) (k : String) : Option String :=
+  (j.getObjValAs? String k).toOption.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+
+private def getInt? (j : Json) (k : String) : Option Int :=
+  (j.getObjValAs? Int k).toOption
+
+/-! ## 1. Google Gemini Code Assist & Antigravity Subscription OAuth -/
+
+def googleTokenUrl : String := "https://oauth2.googleapis.com/token"
+
+/-- Google OAuth client id and secret are not stored in the repo. Set these before a token refresh. -/
+private def requireEnv (name : String) : ExceptT LLMError IO String := do
+  match ← liftM (IO.getEnv name) with
+  | some v =>
+    if v.trimAscii.toString.isEmpty then
+      throw (.auth .missingApiKey s!"Environment variable {name} is empty")
+    return v
+  | none =>
+    throw (.auth .missingApiKey s!"Set {name} to refresh Google OAuth tokens")
+def codeAssistEndpoint : String := "https://cloudcode-pa.googleapis.com/v1internal"
+def antigravityEndpoint : String := "https://daily-cloudcode-pa.googleapis.com/v1internal"
+
+def loadGeminiOAuthFromDisk : IO (Option OAuthCredentials) := do
+  -- 1. ~/.jcode/gemini_oauth.json
+  if let some jcodePath ← Auth.userHomePath ".jcode/gemini_oauth.json" then
+    if let some j ← Auth.readJsonFile? jcodePath then
+      if let some access := getStr? j "access_token" then
+        return some {
+          accessToken  := access
+          refreshToken := (getStr? j "refresh_token").getD ""
+          expiresAtMs  := getInt? j "expires_at"
+          email        := getStr? j "email"
+          source       := some (.jcodeGeminiFile jcodePath)
+        }
+  -- 2. ~/.gemini/oauth_creds.json
+  if let some cliPath ← Auth.userHomePath ".gemini/oauth_creds.json" then
+    if let some j ← Auth.readJsonFile? cliPath then
+      if let some access := getStr? j "access_token" then
+        return some {
+          accessToken  := access
+          refreshToken := (getStr? j "refresh_token").getD ""
+          expiresAtMs  := (getInt? j "expiry_date").or (getInt? j "expires_at")
+          source       := some (.geminiCliFile cliPath)
+        }
+  return none
+
+def loadAntigravityOAuthFromDisk : IO (Option OAuthCredentials) := do
+  let some path ← Auth.userHomePath ".jcode/antigravity_oauth.json" | return none
+  let some j ← Auth.readJsonFile? path | return none
+  let some access := getStr? j "access_token" | return none
+  return some {
+    accessToken  := access
+    refreshToken := (getStr? j "refresh_token").getD ""
+    expiresAtMs  := getInt? j "expires_at"
+    email        := getStr? j "email"
+    projectId    := getStr? j "project_id"
+    source       := some (.antigravityFile path)
+  }
+
+def refreshGoogleOAuth (clientId clientSecret : String) (creds : OAuthCredentials)
+    (session : Option Session := none) : ExceptT LLMError IO OAuthCredentials := do
+  if creds.refreshToken.isEmpty then
+    throw (.auth .invalidApiKey "Google OAuth token is expired and has no refresh_token")
+  let req : Request := {
+    method := .post
+    uri    := .absolute uri!"https://oauth2.googleapis.com/token"
+    body   := .form [
+      ("grant_type", "refresh_token"),
+      ("client_id", clientId),
+      ("client_secret", clientSecret),
+      ("refresh_token", creds.refreshToken)
+    ]
+    timeouts := { connect := .ofNat 10000, total := .ofNat 20000 }
+  }
+  let outcome : Outcome Json ← liftM <| match session with
+    | some s => s.requestAs req
+    | none   => LeanHttp.requestAs req
+  match outcome with
+  | .transport err => throw (.network (.transport err.detail) (toString err))
+  | .status resp =>
+    let raw := (String.fromUTF8? resp.body).getD "<non-UTF8>"
+    throw (.auth .invalidApiKey s!"Google OAuth refresh failed (HTTP {resp.statusCode}): {raw}")
+  | .decode msg _ =>
+    throw (.parse (.invalidJson "<google-oauth>" msg) msg)
+  | .ok j _ =>
+    let some newAccess := getStr? j "access_token"
+      | throw (.parse (.unexpectedSchema "Google OAuth token response" j) "Missing access_token")
+    let newRefresh := (getStr? j "refresh_token").getD creds.refreshToken
+    let expiresInSecs := (getInt? j "expires_in").getD 3600
+    let now ← liftM Auth.nowMs
+    let refreshed := {
+      creds with
+      accessToken  := newAccess
+      refreshToken := newRefresh
+      expiresAtMs  := some (now + expiresInSecs * 1000)
+    }
+    -- Save back if from jcode file
+    if let some (.jcodeGeminiFile path) := creds.source then
+      liftM <| Auth.writeJsonFileAtomic path (Json.mkObj [
+        ("access_token", toJson refreshed.accessToken),
+        ("refresh_token", toJson refreshed.refreshToken),
+        ("expires_at", toJson (refreshed.expiresAtMs.getD 0))
+      ])
+    else if let some (.antigravityFile path) := creds.source then
+      liftM <| Auth.writeJsonFileAtomic path (Json.mkObj <|
+        [("access_token", toJson refreshed.accessToken),
+         ("refresh_token", toJson refreshed.refreshToken),
+         ("expires_at", toJson (refreshed.expiresAtMs.getD 0))] ++
+        (match refreshed.projectId with | some p => [("project_id", toJson p)] | none => []))
+    return refreshed
+
+private def extractCompanionProject (j : Json) : Option String :=
+  if let some s := getStr? j "cloudaicompanionProject" then
+    some s
+  else if let .ok obj := j.getObjVal? "cloudaicompanionProject" then
+    getStr? obj "id"
+  else
+    none
+
+/-- Resolve the `cloudaicompanionProject` ID from `v1internal:loadCodeAssist`. -/
+def resolveCodeAssistProject (baseEndpoint : String) (accessToken : String) (ideType : String := "IDE_UNSPECIFIED")
+    (session : Option Session := none) : ExceptT LLMError IO String := do
+  if let some envProj ← liftM (IO.getEnv "GOOGLE_CLOUD_PROJECT") then
+    if !envProj.trimAscii.toString.isEmpty then
+      return envProj.trimAscii.toString
+  let url := s!"{baseEndpoint}:loadCodeAssist"
+  let some uri := URI.parse? url
+    | throw (.invalidRequest (.malformedParameters url) "Invalid loadCodeAssist URL")
+  let payload := Json.mkObj [
+    ("metadata", Json.mkObj [
+      ("ideType", toJson ideType),
+      ("platform", "PLATFORM_UNSPECIFIED"),
+      ("pluginType", "GEMINI")
+    ])
+  ]
+  let req := (Request.post (.absolute uri))
+    |>.json payload
+    |>.bearer accessToken
+    |>.header headerName!"Accept" headerValue!"application/json"
+    |>.withTimeouts { connect := .ofNat 10000, total := .ofNat 20000 }
+  let outcome : Outcome Json ← liftM <| match session with
+    | some s => s.requestAs req
+    | none   => LeanHttp.requestAs req
+  match outcome with
+  | .transport err => throw (.network (.transport err.detail) (toString err))
+  | .status resp =>
+    let raw := (String.fromUTF8? resp.body).getD "<non-UTF8>"
+    throw (.auth .insufficientPermissions s!"loadCodeAssist failed (HTTP {resp.statusCode}): {raw}")
+  | .decode msg _ => throw (.parse (.invalidJson "<loadCodeAssist>" msg) msg)
+  | .ok j _ =>
+    if let some proj := extractCompanionProject j then
+      return proj
+    throw (.auth .insufficientPermissions s!"loadCodeAssist did not return cloudaicompanionProject: {j.compress}")
+
+def loadAndEnsureFreshGemini (session : Option Session := none) :
+    ExceptT LLMError IO (OAuthCredentials × String) := do
+  let some creds ← liftM loadGeminiOAuthFromDisk
+    | throw (.auth .missingApiKey "No Gemini OAuth credentials found in ~/.jcode/gemini_oauth.json or ~/.gemini/oauth_creds.json")
+  let now ← liftM Auth.nowMs
+  let fresh ← if creds.needsRefresh now 60000 then
+      let clientId ← requireEnv "LEANLLM_GEMINI_OAUTH_CLIENT_ID"
+      let clientSecret ← requireEnv "LEANLLM_GEMINI_OAUTH_CLIENT_SECRET"
+      refreshGoogleOAuth clientId clientSecret creds session
+    else
+      pure creds
+  let projectId ← match fresh.projectId with
+    | some p => pure p
+    | none   => resolveCodeAssistProject codeAssistEndpoint fresh.accessToken "IDE_UNSPECIFIED" session
+  return ({ fresh with projectId := some projectId }, projectId)
+
+def loadAndEnsureFreshAntigravity (session : Option Session := none) :
+    ExceptT LLMError IO (OAuthCredentials × String) := do
+  let some creds ← liftM loadAntigravityOAuthFromDisk
+    | throw (.auth .missingApiKey "No Antigravity OAuth credentials found in ~/.jcode/antigravity_oauth.json")
+  let now ← liftM Auth.nowMs
+  let fresh ← if creds.needsRefresh now 60000 then
+      let clientId ← requireEnv "LEANLLM_ANTIGRAVITY_OAUTH_CLIENT_ID"
+      let clientSecret ← requireEnv "LEANLLM_ANTIGRAVITY_OAUTH_CLIENT_SECRET"
+      refreshGoogleOAuth clientId clientSecret creds session
+    else
+      pure creds
+  let projectId ← match fresh.projectId with
+    | some p => pure p
+    | none   => resolveCodeAssistProject antigravityEndpoint fresh.accessToken "ANTIGRAVITY" session
+  return ({ fresh with projectId := some projectId }, projectId)
+
+/-! ## 2. GitHub Copilot Subscription OAuth Exchange -/
+
+private def extractCopilotOAuthToken (j : Json) : Option String :=
+  if let .ok obj := j.getObjVal? "github.com" then
+    getStr? obj "oauth_token"
+  else if let .ok kv := j.getObj? then
+    kv.toList.findSome? fun (_, v) => getStr? v "oauth_token"
+  else
+    none
+
+def loadGitHubCopilotToken : IO (Option String) := do
+  if let some envTok ← IO.getEnv "GITHUB_COPILOT_TOKEN" then
+    if !envTok.trimAscii.toString.isEmpty then
+      return some envTok.trimAscii.toString
+  for rel in [".config/github-copilot/hosts.json", ".config/github-copilot/apps.json"] do
+    if let some path ← Auth.userHomePath rel then
+      if let some j ← Auth.readJsonFile? path then
+        if let some tok := extractCopilotOAuthToken j then
+          return some tok
+  return none
+
+/-- Exchange a GitHub OAuth token for a short-lived Copilot API bearer token. -/
+def exchangeCopilotBearerToken (session : Option Session := none) : ExceptT LLMError IO String := do
+  let some ghToken ← liftM loadGitHubCopilotToken
+    | throw (.auth .missingApiKey "No GitHub Copilot OAuth token found in ~/.config/github-copilot/hosts.json or GITHUB_COPILOT_TOKEN")
+  let some authVal := Header.Value.ofString? s!"token {ghToken}"
+    | throw (.invalidRequest (.malformedParameters "Invalid GitHub Copilot token") "Invalid token")
+  let req := (Request.get uri!"https://api.github.com/copilot_internal/v2/token")
+    |>.header headerName!"Authorization" authVal
+    |>.header headerName!"User-Agent" headerValue!"GithubCopilot/1.300.0"
+    |>.header headerName!"Editor-Version" headerValue!"vscode/1.100.0"
+    |>.header headerName!"Editor-Plugin-Version" headerValue!"copilot-chat/0.27.0"
+    |>.header headerName!"Accept" headerValue!"application/json"
+  let outcome : Outcome Json ← liftM <| match session with
+    | some s => s.requestAs req
+    | none   => LeanHttp.requestAs req
+  match outcome with
+  | .transport err => throw (.network (.transport err.detail) (toString err))
+  | .status resp =>
+    let raw := (String.fromUTF8? resp.body).getD "<non-UTF8>"
+    throw (.auth .invalidApiKey s!"GitHub Copilot token exchange failed (HTTP {resp.statusCode}): {raw}")
+  | .decode msg _ => throw (.parse (.invalidJson "<copilot>" msg) msg)
+  | .ok j _ =>
+    let some token := getStr? j "token"
+      | throw (.parse (.unexpectedSchema "Copilot token response" j) "Missing 'token' in Copilot response")
+    return token
+
+/-! ## 3. xAI Grok Build Subscription OIDC (`~/.grok/auth.json`) -/
+
+def grokClientId : String := "b1a00492-073a-47ea-816f-4c329264a828"
+def grokScopeKey : String := s!"https://auth.x.ai::{grokClientId}"
+
+def loadAndEnsureFreshGrok (session : Option Session := none) : ExceptT LLMError IO OAuthCredentials := do
+  let some path ← liftM (Auth.userHomePath ".grok/auth.json")
+    | throw (.auth .missingApiKey "Cannot resolve ~/.grok/auth.json")
+  let some root ← liftM (Auth.readJsonFile? path)
+    | throw (.auth .missingApiKey "No Grok Build credentials found in ~/.grok/auth.json")
+  let .ok entry := root.getObjVal? grokScopeKey
+    | throw (.auth .missingApiKey s!"No OIDC scope '{grokScopeKey}' in ~/.grok/auth.json")
+  let some key := getStr? entry "key"
+    | throw (.auth .missingApiKey "Missing 'key' in ~/.grok/auth.json")
+  let refresh := (getStr? entry "refresh_token").getD ""
+  let expiresAtMs := Auth.jwtExpiresAtMs? key
+  let creds : OAuthCredentials := {
+    accessToken  := key
+    refreshToken := refresh
+    expiresAtMs
+    source       := some (.grokAuthFile path)
+  }
+  let now ← liftM Auth.nowMs
+  if !creds.needsRefresh now 60000 then
+    return creds
+  let req : Request := {
+    method := .post
+    uri    := .absolute uri!"https://auth.x.ai/oauth2/token"
+    body   := .form [
+      ("grant_type", "refresh_token"),
+      ("refresh_token", creds.refreshToken),
+      ("client_id", grokClientId)
+    ]
+  }
+  let outcome : Outcome Json ← liftM <| match session with
+    | some s => s.requestAs req
+    | none   => LeanHttp.requestAs req
+  match outcome with
+  | .ok j _ =>
+    let some newAccess := getStr? j "access_token" | return creds
+    let newRefresh := (getStr? j "refresh_token").getD creds.refreshToken
+    return {
+      creds with
+      accessToken  := newAccess
+      refreshToken := newRefresh
+      expiresAtMs  := Auth.jwtExpiresAtMs? newAccess
+    }
+  | _ => return creds
+
+end Leanllm.Auth.Other

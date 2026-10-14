@@ -73,11 +73,14 @@ structure VertexConfig where
 /-- Where the model is hosted and how requests are authenticated/routed. -/
 inductive Provider where
   | direct
-  | openRouter (cfg : OpenRouterConfig := {})
-  | bedrock    (cfg : BedrockConfig    := {})
-  | azure      (cfg : AzureConfig)
-  | vertex     (cfg : VertexConfig)
-  | custom     (baseUrl : String)
+  | openRouter  (cfg : OpenRouterConfig := {})
+  | bedrock     (cfg : BedrockConfig    := {})
+  | azure       (cfg : AzureConfig)
+  | vertex      (cfg : VertexConfig)
+  | copilot                                -- GitHub Copilot subscription (api.githubcopilot.com)
+  | antigravity                            -- Google Antigravity subscription (daily-cloudcode-pa.googleapis.com)
+  | grokBuild                              -- xAI Grok CLI subscription (cli-chat-proxy.grok.com)
+  | custom      (baseUrl : String)
   deriving Repr, BEq, Inhabited
 
 namespace Provider
@@ -94,6 +97,9 @@ def defaultWireApi (provider : Provider) (model : Model) : WireApi :=
   | .vertex _,      .claude _ => .anthropicMessages
   | .vertex _,      .gemini _ => .geminiGenerate
   | .vertex _,      .openai _ => .openaiChat
+  | .copilot,       _         => .openaiChat
+  | .antigravity,   _         => .geminiGenerate
+  | .grokBuild,     _         => .openaiChat
   | .custom _,      _         => .openaiChat
 
 /-- Whether a `Provider` supports hosting a given `Model` family. -/
@@ -107,6 +113,10 @@ def supportsModel : Provider → Model → Bool
   | .vertex _,     .gemini _ => true
   | .vertex _,     .claude _ => true
   | .vertex _,     .openai _ => false
+  | .copilot,      _         => true
+  | .antigravity,  .gemini _ => true
+  | .antigravity,  _         => false
+  | .grokBuild,    _         => true
   | .custom _,     _         => true
 
 /-- Resolve the provider-specific model identifier string. -/
@@ -122,6 +132,12 @@ def resolveModelId (provider : Provider) (model : Model) : String :=
   | .bedrock _, m => m.toModelId
   | .azure cfg, m => cfg.deployment.getD m.toModelId
   | .vertex _, m => m.toModelId
+  | .copilot, .claude m =>
+    -- Copilot uses dot-separated version numbers for Claude models (e.g. claude-sonnet-4.5)
+    (m.toOpenRouterSlug.splitOn "/").getLastD m.toModelId
+  | .copilot, m => m.toModelId
+  | .antigravity, m => m.toModelId
+  | .grokBuild, m => m.toModelId
   | .custom _, m => m.toModelId
 
 end Provider

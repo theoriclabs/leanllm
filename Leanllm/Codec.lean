@@ -4,6 +4,8 @@ import Leanllm.Models
 import Leanllm.Message
 import Leanllm.Error
 import Leanllm.Response
+import Leanllm.Auth
+import Leanllm.Auth.Claude
 
 namespace Leanllm.Codec
 
@@ -39,9 +41,9 @@ private def extractSystemText (messages : List Message) : Option String :=
       | _       => none
   if texts.isEmpty then none else some (String.intercalate "\n\n" texts)
 
-/-! ## Anthropic Messages Wire Codec (`/v1/messages` & Bedrock Invoke) -/
+/-! ## Anthropic Messages Wire Codec (`/v1/messages` & Bedrock Invoke & Claude OAuth) -/
 
-private def encodeAnthropicPart : ContentPart → Json
+private def encodeAnthropicPart (isClaudeOAuth : Bool) : ContentPart → Json
   | .text t =>
     Json.mkObj [("type", "text"), ("text", t)]
   | .image (.url u) =>
@@ -59,10 +61,11 @@ private def encodeAnthropicPart : ContentPart → Json
       ])
     ]
   | .toolCall tc =>
+    let wireName := if isClaudeOAuth then Auth.Claude.mapToolNameForOAuth tc.name else tc.name
     Json.mkObj [
       ("type", "tool_use"),
       ("id", tc.id),
-      ("name", tc.name),
+      ("name", wireName),
       ("input", tc.arguments)
     ]
   | .toolResult tr =>
@@ -75,45 +78,59 @@ private def encodeAnthropicPart : ContentPart → Json
   | .thinking thought sig =>
     Json.mkObj ([("type", toJson "thinking"), ("thinking", toJson thought)] ++ optField "signature" sig)
 
-private def encodeAnthropicMessage (msg : Message) : Option Json :=
+private def encodeAnthropicMessage (isClaudeOAuth : Bool) (msg : Message) : Option Json :=
   if isSystemRole msg.role then none
   else
     let roleStr := match msg.role with
       | .assistant => "assistant"
       | _          => "user"
-    let parts := msg.content.map encodeAnthropicPart
+    let parts := msg.content.map (encodeAnthropicPart isClaudeOAuth)
     some <| Json.mkObj [
       ("role", toJson roleStr),
       ("content", toJson parts)
     ]
 
-private def encodeAnthropicTool (t : ToolSpec) : Json :=
+private def encodeAnthropicTool (isClaudeOAuth : Bool) (t : ToolSpec) : Json :=
+  let wireName := if isClaudeOAuth then Auth.Claude.mapToolNameForOAuth t.name else t.name
   Json.mkObj [
-    ("name", toJson t.name),
+    ("name", toJson wireName),
     ("description", toJson t.description),
     ("input_schema", t.parameters)
   ]
 
-def encodeAnthropicMessages (cfg : ModelConfig) (messages : List Message) (forBedrockInvoke : Bool := false) : Json :=
+def encodeAnthropicMessages (cfg : ModelConfig) (messages : List Message)
+    (forBedrockInvoke : Bool := false) (isClaudeOAuth : Bool := false) : Json :=
   let sys := extractSystemText messages
-  let msgObjs := messages.filterMap encodeAnthropicMessage
-  let toolObjs := cfg.tools.map encodeAnthropicTool
+  let msgObjs := messages.filterMap (encodeAnthropicMessage isClaudeOAuth)
+  let toolObjs := cfg.tools.map (encodeAnthropicTool isClaudeOAuth)
   let headerFields : List (String × Json) :=
     if forBedrockInvoke then
       [("anthropic_version", toJson "bedrock-2023-05-31")]
     else
       [("model", toJson cfg.effectiveModelId)]
+  let systemField : List (String × Json) :=
+    if isClaudeOAuth then
+      let baseBlocks : List Json := [
+        Json.mkObj [("type", "text"), ("text", toJson Auth.Claude.oauthBillingHeader)],
+        Json.mkObj [("type", "text"), ("text", toJson Auth.Claude.claudeCodeIdentity)]
+      ]
+      let allBlocks := match sys with
+        | some s => baseBlocks ++ [Json.mkObj [("type", "text"), ("text", toJson s)]]
+        | none   => baseBlocks
+      [("system", toJson allBlocks)]
+    else
+      optField "system" sys
   Json.mkObj <|
     headerFields ++
     [("max_tokens", toJson (cfg.maxTokens.getD 4096)),
      ("messages", toJson msgObjs)] ++
-    optField "system" sys ++
+    systemField ++
     optField "temperature" cfg.temperature ++
     optField "top_p" cfg.topP ++
     listField "stop_sequences" cfg.stop ++
     listField "tools" toolObjs
 
-private def decodeAnthropicPart (j : Json) : Option ContentPart := do
+private def decodeAnthropicPart (isClaudeOAuth : Bool) (j : Json) : Option ContentPart := do
   let kind ← getStr? j "type"
   match kind with
   | "text" =>
@@ -125,15 +142,16 @@ private def decodeAnthropicPart (j : Json) : Option ContentPart := do
     some (.thinking t sig)
   | "tool_use" =>
     let id ← getStr? j "id"
-    let name ← getStr? j "name"
+    let rawName ← getStr? j "name"
+    let name := if isClaudeOAuth then Auth.Claude.mapToolNameFromOAuth rawName else rawName
     let input := (getObj? j "input").getD (Json.mkObj [])
     some (.toolCall { id, name, arguments := input })
   | _ => none
 
-def decodeAnthropicMessages (cfg : ModelConfig) (j : Json) : Except LLMError LLMResponse := do
+def decodeAnthropicMessages (cfg : ModelConfig) (j : Json) (isClaudeOAuth : Bool := false) : Except LLMError LLMResponse := do
   let some contentArr := getArr? j "content"
     | throw (.parse (.unexpectedSchema "Anthropic response with 'content' array" j) "Missing 'content' array")
-  let parts := contentArr.toList.filterMap decodeAnthropicPart
+  let parts := contentArr.toList.filterMap (decodeAnthropicPart isClaudeOAuth)
   let id := (getStr? j "id").getD ""
   let stopReason := match getStr? j "stop_reason" with
     | some "end_turn"      => StopReason.endTurn
@@ -161,7 +179,7 @@ def decodeAnthropicMessages (cfg : ModelConfig) (j : Json) : Except LLMError LLM
     usage
   }
 
-/-! ## OpenAI Chat Completions Wire Codec (`/v1/chat/completions` & OpenRouter & Azure) -/
+/-! ## OpenAI Chat Completions Wire Codec (`/v1/chat/completions` & OpenRouter & Azure & Copilot & Grok) -/
 
 private def roleToOpenAI : Role → String
   | .system    => "system"
@@ -334,18 +352,32 @@ def decodeOpenAIChat (cfg : ModelConfig) (j : Json) : Except LLMError LLMRespons
     usage
   }
 
-/-! ## OpenAI Responses Wire Codec (`/v1/responses`) -/
+/-! ## OpenAI Responses Wire Codec (`/v1/responses` & ChatGPT/Codex OAuth `backend-api/codex/responses`) -/
 
 private def encodeResponsesInput (msg : Message) : List Json :=
   if isSystemRole msg.role then []
   else
     msg.content.filterMap fun
       | .text t =>
-        let roleStr := if msg.role == .assistant then "assistant" else "user"
+        let isAsst := msg.role == .assistant
+        let roleStr := if isAsst then "assistant" else "user"
+        let blockType := if isAsst then "output_text" else "input_text"
         some <| Json.mkObj [
           ("type", "message"),
           ("role", toJson roleStr),
-          ("content", toJson t)
+          ("content", toJson [Json.mkObj [("type", toJson blockType), ("text", toJson t)]])
+        ]
+      | .image (.url u) =>
+        some <| Json.mkObj [
+          ("type", "message"),
+          ("role", "user"),
+          ("content", toJson [Json.mkObj [("type", "input_image"), ("image_url", toJson u)]])
+        ]
+      | .image (.base64 mime data) =>
+        some <| Json.mkObj [
+          ("type", "message"),
+          ("role", "user"),
+          ("content", toJson [Json.mkObj [("type", "input_image"), ("image_url", toJson s!"data:{mime};base64,{data}")]])
         ]
       | .toolCall tc =>
         some <| Json.mkObj [
@@ -370,18 +402,56 @@ private def encodeResponsesTool (t : ToolSpec) : Json :=
     ("parameters", t.parameters)
   ]
 
-def encodeOpenAIResponses (cfg : ModelConfig) (messages : List Message) : Json :=
+def encodeOpenAIResponses (cfg : ModelConfig) (messages : List Message) (isChatGptOAuth : Bool := false) : Json :=
   let instructions := extractSystemText messages
   let inputs := messages.flatMap encodeResponsesInput
   let tools := cfg.tools.map encodeResponsesTool
-  Json.mkObj <|
-    [("model", toJson cfg.effectiveModelId),
-     ("input", toJson inputs)] ++
-    optField "instructions" instructions ++
-    optField "temperature" cfg.temperature ++
-    optField "max_output_tokens" cfg.maxTokens ++
-    optField "top_p" cfg.topP ++
-    listField "tools" tools
+  if isChatGptOAuth then
+    Json.mkObj <|
+      [("model", toJson cfg.effectiveModelId),
+       ("instructions", toJson (instructions.getD "You are a helpful assistant.")),
+       ("input", toJson inputs),
+       ("tools", toJson tools),
+       ("tool_choice", toJson "auto"),
+       ("parallel_tool_calls", toJson false),
+       ("store", toJson false),
+       ("stream", toJson true)]
+  else
+    Json.mkObj <|
+      [("model", toJson cfg.effectiveModelId),
+       ("input", toJson inputs)] ++
+      optField "instructions" instructions ++
+      optField "temperature" cfg.temperature ++
+      optField "max_output_tokens" cfg.maxTokens ++
+      optField "top_p" cfg.topP ++
+      listField "tools" tools
+
+/-- Decode a single Responses API `output` item (`message`, `function_call`, `reasoning`). -/
+def decodeResponsesOutputItem (item : Json) : Except LLMError (List ContentPart × Bool) := do
+  let mut parts : List ContentPart := []
+  let mut hasToolCall := false
+  match getStr? item "type" with
+  | some "message" =>
+    if let some contentArr := getArr? item "content" then
+      for c in contentArr do
+        if let some t := getStr? c "text" then
+          parts := parts ++ [.text t]
+  | some "function_call" =>
+    hasToolCall := true
+    let callId := (getStr? item "call_id").or (getStr? item "id") |>.getD ""
+    let name := (getStr? item "name").getD ""
+    let rawArgs := (getStr? item "arguments").getD "{}"
+    let args ← match Json.parse rawArgs with
+      | .ok parsed => pure parsed
+      | .error _   => throw (.parse (.invalidToolArgs name rawArgs) s!"Invalid JSON arguments for tool '{name}'")
+    parts := parts ++ [.toolCall { id := callId, name, arguments := args }]
+  | some "reasoning" =>
+    if let some summaryArr := getArr? item "summary" then
+      for s in summaryArr do
+        if let some t := getStr? s "text" then
+          parts := parts ++ [.thinking t none]
+  | _ => pure ()
+  return (parts, hasToolCall)
 
 def decodeOpenAIResponses (cfg : ModelConfig) (j : Json) : Except LLMError LLMResponse := do
   let some outputArr := getArr? j "output"
@@ -389,27 +459,9 @@ def decodeOpenAIResponses (cfg : ModelConfig) (j : Json) : Except LLMError LLMRe
   let mut parts : List ContentPart := []
   let mut hasToolCall := false
   for item in outputArr do
-    match getStr? item "type" with
-    | some "message" =>
-      if let some contentArr := getArr? item "content" then
-        for c in contentArr do
-          if let some t := getStr? c "text" then
-            parts := parts ++ [.text t]
-    | some "function_call" =>
-      hasToolCall := true
-      let callId := (getStr? item "call_id").or (getStr? item "id") |>.getD ""
-      let name := (getStr? item "name").getD ""
-      let rawArgs := (getStr? item "arguments").getD "{}"
-      let args ← match Json.parse rawArgs with
-        | .ok parsed => pure parsed
-        | .error _   => throw (.parse (.invalidToolArgs name rawArgs) s!"Invalid JSON arguments for tool '{name}'")
-      parts := parts ++ [.toolCall { id := callId, name, arguments := args }]
-    | some "reasoning" =>
-      if let some summaryArr := getArr? item "summary" then
-        for s in summaryArr do
-          if let some t := getStr? s "text" then
-            parts := parts ++ [.thinking t none]
-    | _ => pure ()
+    let (itemParts, isTool) ← decodeResponsesOutputItem item
+    parts := parts ++ itemParts
+    hasToolCall := hasToolCall || isTool
 
   let stopReason :=
     if hasToolCall then StopReason.toolUse
@@ -423,7 +475,9 @@ def decodeOpenAIResponses (cfg : ModelConfig) (j : Json) : Except LLMError LLMRe
     let u ← getObj? j "usage"
     let inputTokens ← getNat? u "input_tokens"
     let outputTokens ← getNat? u "output_tokens"
-    pure { inputTokens, outputTokens }
+    let cacheRead := ((getObj? u "input_tokens_details") >>= (getNat? · "cached_tokens"))
+      |>.or ((getObj? u "prompt_tokens_details") >>= (getNat? · "cached_tokens"))
+    pure { inputTokens, outputTokens, cacheReadTokens := cacheRead }
 
   return {
     id      := (getStr? j "id").getD ""
@@ -433,7 +487,7 @@ def decodeOpenAIResponses (cfg : ModelConfig) (j : Json) : Except LLMError LLMRe
     usage
   }
 
-/-! ## Google Gemini Wire Codec (`:generateContent`) -/
+/-! ## Google Gemini Wire Codec (`:generateContent` & Code Assist / Antigravity `v1internal`) -/
 
 private def encodeGeminiPart : ContentPart → Option Json
   | .text t => some <| Json.mkObj [("text", toJson t)]
@@ -468,10 +522,11 @@ private def encodeGeminiMessage (msg : Message) : Option Json :=
     if parts.isEmpty then none
     else some <| Json.mkObj [("role", toJson roleStr), ("parts", toJson parts)]
 
-def encodeGeminiGenerate (cfg : ModelConfig) (messages : List Message) : Json :=
+def encodeGeminiGenerate (cfg : ModelConfig) (messages : List Message)
+    (codeAssistProject : Option String := none) : Json :=
   let sysField : List (String × Json) :=
     match extractSystemText messages with
-    | some sys => [("systemInstruction", Json.mkObj [("parts", toJson [Json.mkObj [("text", toJson sys)]])])]
+    | some sys => [("systemInstruction", Json.mkObj [("role", "user"), ("parts", toJson [Json.mkObj [("text", toJson sys)]])])]
     | none     => []
   let contents := messages.filterMap encodeGeminiMessage
   let toolsField : List (String × Json) :=
@@ -490,15 +545,26 @@ def encodeGeminiGenerate (cfg : ModelConfig) (messages : List Message) : Json :=
     optField "topP" cfg.topP ++
     listField "stopSequences" cfg.stop
   let genCfg :=
-    if genCfgFields.isEmpty then []
+    if genCfgFields.isEmpty || codeAssistProject.isSome then []
     else [("generationConfig", Json.mkObj genCfgFields)]
-  Json.mkObj (sysField ++ [("contents", toJson contents)] ++ toolsField ++ genCfg)
+  let baseReq := Json.mkObj (sysField ++ [("contents", toJson contents)] ++ toolsField ++ genCfg)
+  match codeAssistProject with
+  | some projectId =>
+    Json.mkObj [
+      ("model", toJson cfg.effectiveModelId),
+      ("project", toJson projectId),
+      ("user_prompt_id", toJson "leanllm-turn"),
+      ("request", baseReq)
+    ]
+  | none => baseReq
 
-def decodeGeminiGenerate (cfg : ModelConfig) (j : Json) : Except LLMError LLMResponse := do
+def decodeGeminiGenerate (cfg : ModelConfig) (rawJson : Json) : Except LLMError LLMResponse := do
+  -- Unwrap Code Assist / Antigravity `{"response": ...}` envelope if present
+  let j := (getObj? rawJson "response").getD rawJson
   let some candidates := getArr? j "candidates"
-    | throw (.parse (.unexpectedSchema "Gemini response with 'candidates' array" j) "Missing 'candidates' array")
+    | throw (.parse (.unexpectedSchema "Gemini response with 'candidates' array" rawJson) "Missing 'candidates' array")
   let some first := candidates[0]?
-    | throw (.parse (.unexpectedSchema "Non-empty 'candidates' array" j) "Empty 'candidates' array")
+    | throw (.parse (.unexpectedSchema "Non-empty 'candidates' array" rawJson) "Empty 'candidates' array")
   let mut parts : List ContentPart := []
   let mut hasToolCall := false
   if let some contentObj := getObj? first "content" then
@@ -539,7 +605,7 @@ def decodeGeminiGenerate (cfg : ModelConfig) (j : Json) : Except LLMError LLMRes
     }
 
   return {
-    id      := (getStr? j "responseId").getD ""
+    id      := (getStr? rawJson "traceId").or (getStr? j "responseId") |>.getD ""
     model   := cfg.model
     message := { role := .assistant, content := parts }
     stopReason
@@ -659,64 +725,100 @@ def decodeBedrockConverse (cfg : ModelConfig) (j : Json) : Except LLMError LLMRe
 
 /-! ## Unified Wire Dispatch -/
 
-/-- Encode a `ModelConfig` and `List Message` into the wire JSON for `cfg.effectiveWireApi`. -/
-def encodeRequest (cfg : ModelConfig) (messages : List Message) : Except LLMError Json :=
-  match cfg.effectiveWireApi with
-  | .anthropicMessages => .ok (encodeAnthropicMessages cfg messages false)
+/-- Encode a `ModelConfig` and `List Message` into the wire JSON for `cfg` and optional `ResolvedAuth`. -/
+def encodeRequestWithAuth (cfg : ModelConfig) (messages : List Message)
+    (auth : Option ResolvedAuth := none) : Except LLMError Json :=
+  let api := match auth with
+    | some a => cfg.effectiveWireApiForAuth a
+    | none   => cfg.effectiveWireApi
+  let isClaudeOAuth := match auth with | some (.claudeOAuth _) => true | _ => false
+  let isChatGptOAuth := match auth with | some (.openaiOAuth _) => true | _ => false
+  let codeAssistProject : Option String := match auth with
+    | some (.geminiOAuth _ proj)      => some proj
+    | some (.antigravityOAuth _ proj) => some proj
+    | _                               => none
+  match api with
+  | .anthropicMessages => .ok (encodeAnthropicMessages cfg messages false isClaudeOAuth)
   | .openaiChat        => .ok (encodeOpenAIChat cfg messages)
-  | .openaiResponses   => .ok (encodeOpenAIResponses cfg messages)
-  | .geminiGenerate    => .ok (encodeGeminiGenerate cfg messages)
+  | .openaiResponses   => .ok (encodeOpenAIResponses cfg messages isChatGptOAuth)
+  | .geminiGenerate    => .ok (encodeGeminiGenerate cfg messages codeAssistProject)
   | .bedrockConverse   => .ok (encodeBedrockConverse cfg messages)
-  | .bedrockInvoke     => .ok (encodeAnthropicMessages cfg messages true)
+  | .bedrockInvoke     => .ok (encodeAnthropicMessages cfg messages true false)
   | .auto              => .ok (encodeOpenAIChat cfg messages)
 
-/-- Decode a wire JSON payload into a canonical `LLMResponse` using `cfg.effectiveWireApi`. -/
-def decodeResponse (cfg : ModelConfig) (j : Json) : Except LLMError LLMResponse :=
-  match cfg.effectiveWireApi with
-  | .anthropicMessages => decodeAnthropicMessages cfg j
+/-- Encode a `ModelConfig` and `List Message` into the wire JSON for `cfg.effectiveWireApi`. -/
+def encodeRequest (cfg : ModelConfig) (messages : List Message) : Except LLMError Json :=
+  encodeRequestWithAuth cfg messages none
+
+/-- Decode a wire JSON payload into a canonical `LLMResponse` using `cfg` and optional `ResolvedAuth`. -/
+def decodeResponseWithAuth (cfg : ModelConfig) (j : Json)
+    (auth : Option ResolvedAuth := none) : Except LLMError LLMResponse :=
+  let api := match auth with
+    | some a => cfg.effectiveWireApiForAuth a
+    | none   => cfg.effectiveWireApi
+  let isClaudeOAuth := match auth with | some (.claudeOAuth _) => true | _ => false
+  match api with
+  | .anthropicMessages => decodeAnthropicMessages cfg j isClaudeOAuth
   | .openaiChat        => decodeOpenAIChat cfg j
   | .openaiResponses   => decodeOpenAIResponses cfg j
   | .geminiGenerate    => decodeGeminiGenerate cfg j
   | .bedrockConverse   => decodeBedrockConverse cfg j
-  | .bedrockInvoke     => decodeAnthropicMessages cfg j
+  | .bedrockInvoke     => decodeAnthropicMessages cfg j false
   | .auto              => decodeOpenAIChat cfg j
 
-/-- Encode a streaming request JSON payload for `cfg.effectiveWireApi`. -/
-def encodeStreamRequest (cfg : ModelConfig) (messages : List Message) : Except LLMError Json := do
-  let base ← encodeRequest cfg messages
-  match cfg.effectiveWireApi with
+/-- Decode a wire JSON payload into a canonical `LLMResponse` using `cfg.effectiveWireApi`. -/
+def decodeResponse (cfg : ModelConfig) (j : Json) : Except LLMError LLMResponse :=
+  decodeResponseWithAuth cfg j none
+
+/-- Encode a streaming request JSON payload for `cfg` and optional `ResolvedAuth`. -/
+def encodeStreamRequestWithAuth (cfg : ModelConfig) (messages : List Message)
+    (auth : Option ResolvedAuth := none) : Except LLMError Json := do
+  let base ← encodeRequestWithAuth cfg messages auth
+  let api := match auth with
+    | some a => cfg.effectiveWireApiForAuth a
+    | none   => cfg.effectiveWireApi
+  match api with
   | .anthropicMessages | .openaiChat | .openaiResponses | .auto =>
     return base.setObjVal! "stream" (toJson true)
   | .geminiGenerate | .bedrockConverse | .bedrockInvoke =>
     return base
 
-/-- Extract a text delta (if any) from a single SSE event payload for `cfg.effectiveWireApi`. -/
-def decodeSseTextDelta (cfg : ModelConfig) (eventName : String) (rawData : String) : Option String := do
+/-- Encode a streaming request JSON payload for `cfg.effectiveWireApi`. -/
+def encodeStreamRequest (cfg : ModelConfig) (messages : List Message) : Except LLMError Json :=
+  encodeStreamRequestWithAuth cfg messages none
+
+/-- Extract a text delta (if any) from a single SSE event payload. -/
+def decodeSseTextDeltaWithAuth (cfg : ModelConfig) (eventName : String) (rawData : String)
+    (auth : Option ResolvedAuth := none) : Option String := do
   let trimmed := rawData.trimAscii.toString
   if trimmed.isEmpty || trimmed == "[DONE]" then none
   else
-    let j ← (Json.parse trimmed).toOption
-    match cfg.effectiveWireApi with
+    let rawJson ← (Json.parse trimmed).toOption
+    let api := match auth with
+      | some a => cfg.effectiveWireApiForAuth a
+      | none   => cfg.effectiveWireApi
+    match api with
     | .anthropicMessages | .bedrockInvoke =>
-      let typ := (getStr? j "type").getD eventName
+      let typ := (getStr? rawJson "type").getD eventName
       if typ == "content_block_delta" then
-        let delta ← getObj? j "delta"
+        let delta ← getObj? rawJson "delta"
         (getStr? delta "text").or (getStr? delta "thinking")
       else
         none
     | .openaiChat | .auto =>
-      let choices ← getArr? j "choices"
+      let choices ← getArr? rawJson "choices"
       let first ← choices[0]?
       let delta ← getObj? first "delta"
       let text ← getStr? delta "content"
       if text.isEmpty then none else some text
     | .openaiResponses =>
-      let typ := (getStr? j "type").getD eventName
+      let typ := (getStr? rawJson "type").getD eventName
       if typ == "response.output_text.delta" then
-        getStr? j "delta"
+        getStr? rawJson "delta"
       else
         none
     | .geminiGenerate =>
+      let j := (getObj? rawJson "response").getD rawJson
       let candidates ← getArr? j "candidates"
       let first ← candidates[0]?
       let content ← getObj? first "content"
@@ -726,7 +828,11 @@ def decodeSseTextDelta (cfg : ModelConfig) (eventName : String) (rawData : Strin
         if isThought then none else getStr? p "text"
       if texts.isEmpty then none else some (String.intercalate "" texts)
     | .bedrockConverse =>
-      let delta ← getObj? j "delta"
+      let delta ← getObj? rawJson "delta"
       getStr? delta "text"
+
+/-- Extract a text delta (if any) from a single SSE event payload for `cfg.effectiveWireApi`. -/
+def decodeSseTextDelta (cfg : ModelConfig) (eventName : String) (rawData : String) : Option String :=
+  decodeSseTextDeltaWithAuth cfg eventName rawData none
 
 end Leanllm.Codec

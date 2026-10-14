@@ -3,6 +3,10 @@ import Lean.Data.Json
 import Leanllm.Provider
 import Leanllm.Models
 import Leanllm.Error
+import Leanllm.Auth
+import Leanllm.Auth.OpenAI
+import Leanllm.Auth.Claude
+import Leanllm.Auth.Other
 
 namespace Leanllm.Transport
 
@@ -18,6 +22,9 @@ def apiKeyEnvVars (provider : Provider) (model : Model) : List String :=
   | .bedrock _,    _         => ["AWS_BEARER_TOKEN_BEDROCK", "BEDROCK_API_KEY"]
   | .azure _,      _         => ["AZURE_OPENAI_API_KEY", "OPENAI_API_KEY"]
   | .vertex _,     _         => ["VERTEX_API_KEY", "GOOGLE_ACCESS_TOKEN"]
+  | .copilot,      _         => ["GITHUB_COPILOT_TOKEN"]
+  | .antigravity,  _         => ["ANTIGRAVITY_API_KEY"]
+  | .grokBuild,    _         => ["GROK_DEPLOYMENT_KEY", "XAI_API_KEY"]
   | .custom _,     _         => ["LLM_API_KEY", "OPENAI_API_KEY"]
 
 /-- Resolve the API key from `cfg.apiKey` or the environment. -/
@@ -33,6 +40,60 @@ def resolveApiKey (cfg : ModelConfig) : ExceptT LLMError IO String := do
   | _ =>
     let varsStr := String.intercalate " or " envVars
     throw (.auth .missingApiKey s!"Missing API key: set ModelConfig.apiKey or environment variable {varsStr}")
+
+/-- Resolve the concrete `ResolvedAuth` for a `ModelConfig` (API key, subscription OAuth, or bearer token). -/
+def resolveAuth (cfg : ModelConfig) (session : Option Session := none) :
+    ExceptT LLMError IO ResolvedAuth := do
+  match cfg.provider with
+  | .copilot =>
+    let tok ← Auth.Other.exchangeCopilotBearerToken session
+    return .copilotBearer tok
+  | .antigravity =>
+    let (creds, proj) ← Auth.Other.loadAndEnsureFreshAntigravity session
+    return .antigravityOAuth creds proj
+  | .grokBuild =>
+    let creds ← Auth.Other.loadAndEnsureFreshGrok session
+    return .grokOAuth creds
+  | _ =>
+    match cfg.auth with
+    | .bearer tok => return .bearer tok
+    | .apiKey (some k) => return .apiKey k
+    | .apiKey none => return .apiKey (← resolveApiKey cfg)
+    | .oauth requestedAccount =>
+      match cfg.provider, cfg.model with
+      | .direct, .openai _ =>
+        let creds ← Auth.OpenAI.loadAndEnsureFresh requestedAccount session
+        return .openaiOAuth creds
+      | .direct, .claude _ =>
+        let creds ← Auth.Claude.loadAndEnsureFresh requestedAccount session
+        return .claudeOAuth creds
+      | .direct, .gemini _ =>
+        let (creds, proj) ← Auth.Other.loadAndEnsureFreshGemini session
+        return .geminiOAuth creds proj
+      | _, _ =>
+        throw (.invalidRequest
+          (.unsupportedFeature s!"Subscription OAuth is not supported for provider {repr cfg.provider}")
+          "Unsupported OAuth provider")
+    | .auto =>
+      if let some key := cfg.apiKey then
+        if !key.isEmpty then return .apiKey key
+      let envVars := apiKeyEnvVars cfg.provider cfg.model
+      for var in envVars do
+        if let some val ← liftM (IO.getEnv var) then
+          if !val.isEmpty then return .apiKey val
+      -- If no API key is set in config or env, automatically try local subscription OAuth for `.direct`
+      match cfg.provider, cfg.model with
+      | .direct, .openai _ =>
+        let creds ← Auth.OpenAI.loadAndEnsureFresh none session
+        return .openaiOAuth creds
+      | .direct, .claude _ =>
+        let creds ← Auth.Claude.loadAndEnsureFresh none session
+        return .claudeOAuth creds
+      | .direct, .gemini _ =>
+        let (creds, proj) ← Auth.Other.loadAndEnsureFreshGemini session
+        return .geminiOAuth creds proj
+      | _, _ =>
+        return .apiKey (← resolveApiKey cfg)
 
 /-- Map a `LeanHttp.Error` transport failure to a typed `LLMError`. -/
 def fromHttpError (err : LeanHttp.Error) : LLMError :=
@@ -161,12 +222,34 @@ def resolveEndpointUrl (cfg : ModelConfig) : String :=
       | .claude _ => s!"{host}/publishers/anthropic/models/{modelId}:rawPredict"
       | .gemini _ => s!"{host}/publishers/google/models/{modelId}:generateContent"
       | .openai _ => s!"{host}/endpoints/openapi/chat/completions"
+    | .copilot =>
+      match api with
+      | .openaiResponses => "https://api.githubcopilot.com/responses"
+      | _                => "https://api.githubcopilot.com/chat/completions"
+    | .antigravity =>
+      s!"{Auth.Other.antigravityEndpoint}:generateContent"
+    | .grokBuild =>
+      "https://cli-chat-proxy.grok.com/v1/chat/completions"
     | .custom base =>
       let trimmed := if base.endsWith "/" then (base.dropEnd 1).toString else base
       match api with
       | .anthropicMessages => s!"{trimmed}/v1/messages"
       | .openaiResponses   => s!"{trimmed}/v1/responses"
       | _                  => s!"{trimmed}/chat/completions"
+
+/-- Construct the endpoint URL taking into account the resolved `ResolvedAuth`. -/
+def resolveEndpointUrlWithAuth (cfg : ModelConfig) (auth : ResolvedAuth) : String :=
+  if cfg.baseUrl.isSome then
+    resolveEndpointUrl cfg
+  else
+    match auth with
+    | .openaiOAuth _        => Auth.OpenAI.chatGptResponsesUrl
+    | .claudeOAuth _        => Auth.Claude.oauthMessagesUrl
+    | .geminiOAuth _ _      => s!"{Auth.Other.codeAssistEndpoint}:generateContent"
+    | .antigravityOAuth _ _ => s!"{Auth.Other.antigravityEndpoint}:generateContent"
+    | .copilotBearer _      => resolveEndpointUrl { cfg with provider := .copilot }
+    | .grokOAuth _          => "https://cli-chat-proxy.grok.com/v1/chat/completions"
+    | .apiKey _ | .bearer _ => resolveEndpointUrl cfg
 
 /-- Build a `LeanHttp.Request` from a `ModelConfig`, resolved API key, and encoded JSON body. -/
 def buildHttpRequest (cfg : ModelConfig) (apiKey : String) (payload : Json) : Except LLMError Request := do
@@ -198,7 +281,7 @@ def buildHttpRequest (cfg : ModelConfig) (apiKey : String) (payload : Json) : Ex
   | .azure azCfg =>
     req ← setHeaderOrThrow req headerName!"api-key" apiKey
     req := req.param "api-version" azCfg.apiVersion
-  | .vertex _ =>
+  | .vertex _ | .copilot | .antigravity | .grokBuild =>
     req := req.bearer apiKey
   | .custom _ =>
     if !apiKey.isEmpty then
@@ -206,16 +289,108 @@ def buildHttpRequest (cfg : ModelConfig) (apiKey : String) (payload : Json) : Ex
 
   return req
 
-/-- Build a streaming `LeanHttp.Request` (for SSE) from a `ModelConfig`, resolved API key, and encoded JSON body. -/
-def buildStreamHttpRequest (cfg : ModelConfig) (apiKey : String) (payload : Json) : Except LLMError Request := do
-  let req ← buildHttpRequest cfg apiKey payload
-  match cfg.effectiveWireApi with
+/-- Build a `LeanHttp.Request` from a `ModelConfig`, `ResolvedAuth`, and encoded JSON body. -/
+def buildHttpRequestWithAuth (cfg : ModelConfig) (auth : ResolvedAuth) (payload : Json) :
+    Except LLMError Request := do
+  match auth with
+  | .apiKey key =>
+    buildHttpRequest cfg key payload
+  | .bearer tok =>
+    let url := resolveEndpointUrlWithAuth cfg auth
+    let target ← parseTarget url
+    return (Request.post target)
+      |>.json payload
+      |>.bearer tok
+      |>.header headerName!"Accept" headerValue!"application/json"
+      |>.withTimeouts { connect := .ofNat 15000, total := .ofNat 120000 }
+  | .openaiOAuth creds =>
+    let url := resolveEndpointUrlWithAuth cfg auth
+    let target ← parseTarget url
+    let mut req := (Request.post target)
+      |>.json payload
+      |>.bearer creds.accessToken
+      |>.header headerName!"Accept" headerValue!"text/event-stream"
+      |>.header headerName!"originator" headerValue!"codex_cli_rs"
+      |>.withTimeouts { connect := .ofNat 15000, total := .ofNat 120000 }
+    if let some accountId := creds.accountId then
+      if !accountId.isEmpty then
+        req ← setHeaderOrThrow req headerName!"chatgpt-account-id" accountId
+    return req
+  | .claudeOAuth creds =>
+    let url := resolveEndpointUrlWithAuth cfg auth
+    let target ← parseTarget url
+    let mut req := (Request.post target)
+      |>.json payload
+      |>.bearer creds.accessToken
+      |>.header headerName!"Accept" headerValue!"application/json"
+      |>.header headerName!"anthropic-version" headerValue!"2023-06-01"
+      |>.header headerName!"x-app" headerValue!"cli"
+      |>.header headerName!"anthropic-dangerous-direct-browser-access" headerValue!"true"
+      |>.withTimeouts { connect := .ofNat 15000, total := .ofNat 120000 }
+    req ← setHeaderOrThrow req headerName!"User-Agent" Auth.Claude.claudeCliUserAgent
+    req ← setHeaderOrThrow req headerName!"anthropic-beta" Auth.Claude.oauthBetaHeaders
+    return req
+  | .geminiOAuth creds _ =>
+    let url := resolveEndpointUrlWithAuth cfg auth
+    let target ← parseTarget url
+    return (Request.post target)
+      |>.json payload
+      |>.bearer creds.accessToken
+      |>.header headerName!"Accept" headerValue!"application/json"
+      |>.withTimeouts { connect := .ofNat 15000, total := .ofNat 120000 }
+  | .antigravityOAuth creds _ =>
+    let url := resolveEndpointUrlWithAuth cfg auth
+    let target ← parseTarget url
+    let mut req := (Request.post target)
+      |>.json payload
+      |>.bearer creds.accessToken
+      |>.header headerName!"Accept" headerValue!"application/json"
+      |>.header headerName!"x-goog-api-client" headerValue!"google-cloud-sdk vscode_cloudshelleditor/0.1"
+      |>.withTimeouts { connect := .ofNat 15000, total := .ofNat 120000 }
+    req ← setHeaderOrThrow req headerName!"User-Agent" "antigravity/1.18.3 darwin/arm64"
+    req ← setHeaderOrThrow req headerName!"client-metadata" "{\"ideType\":\"ANTIGRAVITY\",\"platform\":\"PLATFORM_UNSPECIFIED\",\"pluginType\":\"GEMINI\"}"
+    return req
+  | .copilotBearer tok =>
+    let url := resolveEndpointUrlWithAuth cfg auth
+    let target ← parseTarget url
+    return (Request.post target)
+      |>.json payload
+      |>.bearer tok
+      |>.header headerName!"Accept" headerValue!"application/json"
+      |>.header headerName!"User-Agent" headerValue!"GithubCopilot/1.300.0"
+      |>.header headerName!"Editor-Version" headerValue!"vscode/1.100.0"
+      |>.header headerName!"Editor-Plugin-Version" headerValue!"copilot-chat/0.27.0"
+      |>.header headerName!"Copilot-Integration-Id" headerValue!"vscode-chat"
+      |>.withTimeouts { connect := .ofNat 15000, total := .ofNat 120000 }
+  | .grokOAuth creds =>
+    let url := resolveEndpointUrlWithAuth cfg auth
+    let target ← parseTarget url
+    return (Request.post target)
+      |>.json payload
+      |>.bearer creds.accessToken
+      |>.header headerName!"Accept" headerValue!"application/json"
+      |>.header headerName!"User-Agent" headerValue!"grok-cli/1.0.41"
+      |>.header headerName!"X-XAI-Token-Auth" headerValue!"xai-grok-cli"
+      |>.header headerName!"x-grok-client-version" headerValue!"1.0.41"
+      |>.header headerName!"x-grok-client-identifier" headerValue!"grok-shell"
+      |>.header headerName!"x-grok-client-surface" headerValue!"cli"
+      |>.withTimeouts { connect := .ofNat 15000, total := .ofNat 120000 }
+
+/-- Build a streaming `LeanHttp.Request` (for SSE) from a `ModelConfig`, `ResolvedAuth`, and encoded JSON body. -/
+def buildStreamHttpRequestWithAuth (cfg : ModelConfig) (auth : ResolvedAuth) (payload : Json) :
+    Except LLMError Request := do
+  let req ← buildHttpRequestWithAuth cfg auth payload
+  match cfg.effectiveWireApiForAuth auth with
   | .geminiGenerate =>
-    let streamUrl := (resolveEndpointUrl cfg).replace ":generateContent" ":streamGenerateContent"
+    let streamUrl := (resolveEndpointUrlWithAuth cfg auth).replace ":generateContent" ":streamGenerateContent"
     let target ← parseTarget streamUrl
     return ({ req with uri := target }).param "alt" "sse"
   | _ =>
     return req
+
+/-- Build a streaming `LeanHttp.Request` (for SSE) from a `ModelConfig`, resolved API key, and encoded JSON body. -/
+def buildStreamHttpRequest (cfg : ModelConfig) (apiKey : String) (payload : Json) : Except LLMError Request :=
+  buildStreamHttpRequestWithAuth cfg (.apiKey apiKey) payload
 
 /-- Execute a `LeanHttp.Request` (optionally reusing a `LeanHttp.Session`) and decode the JSON response. -/
 def sendJson (req : Request) (session : Option Session := none) : ExceptT LLMError IO Json := do
