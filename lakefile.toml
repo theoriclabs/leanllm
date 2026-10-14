@@ -1,0 +1,10 @@
+name = "leanllm"
+version = "0.1.0"
+defaultTargets = ["leanllm"]
+
+[[lean_lib]]
+name = "Leanllm"
+
+[[lean_exe]]
+name = "leanllm"
+root = "Main"
