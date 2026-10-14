@@ -40,6 +40,35 @@ def callWithSession (cfg : ModelConfig) (messages : List Message)
 def call (cfg : ModelConfig) (messages : List Message) : ExceptT LLMError IO LLMResponse :=
   callWithSession cfg messages none
 
+/-- Stream an LLM completion over SSE using `LeanHttp.Sse`, invoking `onDelta` for each text chunk
+    and returning the concatenated response text. -/
+def callStreamWithSession (cfg : ModelConfig) (messages : List Message)
+    (onDelta : String → IO Unit)
+    (session : Option LeanHttp.Session := none) : ExceptT LLMError IO String := do
+  if !cfg.provider.supportsModel cfg.model then
+    throw (.invalidRequest
+      (.unsupportedFeature s!"Provider {repr cfg.provider} does not support model {cfg.model}")
+      "Unsupported model for provider")
+  let apiKey ← Transport.resolveApiKey cfg
+  let payload ← match Codec.encodeStreamRequest cfg messages with
+    | .ok j      => pure j
+    | .error err => throw err
+  let req ← match Transport.buildStreamHttpRequest cfg apiKey payload with
+    | .ok r      => pure r
+    | .error err => throw err
+  let accRef ← liftM (m := IO) (IO.mkRef "")
+  Transport.sendSse req session fun ev => do
+    if let some delta := Codec.decodeSseTextDelta cfg ev.event ev.data then
+      accRef.modify (· ++ delta)
+      onDelta delta
+  let fullText ← liftM (m := IO) accRef.get
+  return fullText
+
+/-- Stream a one-shot LLM call over SSE, invoking `onDelta` for each text chunk. -/
+def callStream (cfg : ModelConfig) (messages : List Message)
+    (onDelta : String → IO Unit) : ExceptT LLMError IO String :=
+  callStreamWithSession cfg messages onDelta none
+
 namespace LLMM
 
 /-- Read the current `ModelConfig` inside `LLMM`. -/
@@ -96,5 +125,14 @@ def completion (messages : List Message) (tools : List ToolSpec := []) : LLMM LL
 def ask (prompt : String) : LLMM String := do
   let resp ← completion [Message.user prompt]
   return resp.text
+
+/-- Monadic streaming LLM completion over SSE in `LLMM`. -/
+def completionStream (messages : List Message) (onDelta : String → IO Unit) : LLMM String := do
+  let ctx ← read
+  callStreamWithSession ctx.config messages onDelta ctx.session
+
+/-- Stream a single user prompt over SSE in `LLMM`. -/
+def askStream (prompt : String) (onDelta : String → IO Unit) : LLMM String :=
+  completionStream [Message.user prompt] onDelta
 
 end Leanllm

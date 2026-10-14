@@ -206,6 +206,17 @@ def buildHttpRequest (cfg : ModelConfig) (apiKey : String) (payload : Json) : Ex
 
   return req
 
+/-- Build a streaming `LeanHttp.Request` (for SSE) from a `ModelConfig`, resolved API key, and encoded JSON body. -/
+def buildStreamHttpRequest (cfg : ModelConfig) (apiKey : String) (payload : Json) : Except LLMError Request := do
+  let req ← buildHttpRequest cfg apiKey payload
+  match cfg.effectiveWireApi with
+  | .geminiGenerate =>
+    let streamUrl := (resolveEndpointUrl cfg).replace ":generateContent" ":streamGenerateContent"
+    let target ← parseTarget streamUrl
+    return ({ req with uri := target }).param "alt" "sse"
+  | _ =>
+    return req
+
 /-- Execute a `LeanHttp.Request` (optionally reusing a `LeanHttp.Session`) and decode the JSON response. -/
 def sendJson (req : Request) (session : Option Session := none) : ExceptT LLMError IO Json := do
   let outcome : Outcome Json ← liftM <| match session with

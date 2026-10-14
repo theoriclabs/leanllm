@@ -681,4 +681,52 @@ def decodeResponse (cfg : ModelConfig) (j : Json) : Except LLMError LLMResponse 
   | .bedrockInvoke     => decodeAnthropicMessages cfg j
   | .auto              => decodeOpenAIChat cfg j
 
+/-- Encode a streaming request JSON payload for `cfg.effectiveWireApi`. -/
+def encodeStreamRequest (cfg : ModelConfig) (messages : List Message) : Except LLMError Json := do
+  let base ← encodeRequest cfg messages
+  match cfg.effectiveWireApi with
+  | .anthropicMessages | .openaiChat | .openaiResponses | .auto =>
+    return base.setObjVal! "stream" (toJson true)
+  | .geminiGenerate | .bedrockConverse | .bedrockInvoke =>
+    return base
+
+/-- Extract a text delta (if any) from a single SSE event payload for `cfg.effectiveWireApi`. -/
+def decodeSseTextDelta (cfg : ModelConfig) (eventName : String) (rawData : String) : Option String := do
+  let trimmed := rawData.trimAscii.toString
+  if trimmed.isEmpty || trimmed == "[DONE]" then none
+  else
+    let j ← (Json.parse trimmed).toOption
+    match cfg.effectiveWireApi with
+    | .anthropicMessages | .bedrockInvoke =>
+      let typ := (getStr? j "type").getD eventName
+      if typ == "content_block_delta" then
+        let delta ← getObj? j "delta"
+        (getStr? delta "text").or (getStr? delta "thinking")
+      else
+        none
+    | .openaiChat | .auto =>
+      let choices ← getArr? j "choices"
+      let first ← choices[0]?
+      let delta ← getObj? first "delta"
+      let text ← getStr? delta "content"
+      if text.isEmpty then none else some text
+    | .openaiResponses =>
+      let typ := (getStr? j "type").getD eventName
+      if typ == "response.output_text.delta" then
+        getStr? j "delta"
+      else
+        none
+    | .geminiGenerate =>
+      let candidates ← getArr? j "candidates"
+      let first ← candidates[0]?
+      let content ← getObj? first "content"
+      let parts ← getArr? content "parts"
+      let texts := parts.toList.filterMap fun p =>
+        let isThought := (p.getObjValAs? Bool "thought").toOption.getD false
+        if isThought then none else getStr? p "text"
+      if texts.isEmpty then none else some (String.intercalate "" texts)
+    | .bedrockConverse =>
+      let delta ← getObj? j "delta"
+      getStr? delta "text"
+
 end Leanllm.Codec

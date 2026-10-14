@@ -84,3 +84,24 @@ def main : IO Unit := do
       wireApi   := .openaiResponses
       maxTokens := some 64 }
     promptMsgs
+
+  -- 8. Live SSE Streaming via LeanHttp v0.6.0 (Anthropic, Gemini, OpenRouter)
+  for (label, cfg) in [
+    ("8a. SSE Stream Direct Anthropic (Claude Haiku 5.5)",
+      { model := .claude .haiku55, maxTokens := some 64 : ModelConfig }),
+    ("8b. SSE Stream Direct Gemini (gemini-3.5-flash)",
+      { model := .gemini .flash35, maxTokens := some 128 : ModelConfig }),
+    ("8c. SSE Stream OpenRouter (gpt-4o-mini)",
+      { model := .openai .gpt4oMini, provider := .openRouter { appName := some "leanllm-test" }, maxTokens := some 64 : ModelConfig })
+  ] do
+    IO.println s!"=== {label} ==="
+    IO.print "  Streamed:   "
+    let chunksRef ← IO.mkRef 0
+    match ← LLMM.run cfg (completionStream promptMsgs fun delta => do
+      chunksRef.modify (· + 1)
+      IO.print delta) with
+    | .ok _ =>
+      let n ← chunksRef.get
+      IO.println s!"\n  Chunks:     {n}"
+    | .error err =>
+      IO.println s!"\n  ERROR:      {repr err}"
