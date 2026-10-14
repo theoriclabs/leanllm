@@ -8,7 +8,7 @@ See [README.md](../README.md) for quick-start usage and [EXAMPLES.md](EXAMPLES.m
 
 Most multi-provider LLM clients conflate the model family, the hosting service, and the wire protocol. In practice these three vary independently:
 
-1. `Leanllm.Model`: The model family and version, such as `.claude .sonnet55`, `.openai .gpt4oMini`, or `.gemini .flash35`.
+1. `Leanllm.Model`: The model family and version, such as `.claude .sonnet5_5`, `.openai .gpt4oMini`, or `.gemini .flash3_5`.
 2. `Leanllm.Provider`: Where the model is hosted and how requests are authenticated and routed (`.direct`, `.openRouter`, `.bedrock`, `.azure`, `.vertex`, or `.custom`).
 3. `Leanllm.WireApi`: Which JSON schema goes over HTTP and Server-Sent Events (`.anthropicMessages`, `.openaiChat`, `.openaiResponses`, `.geminiGenerate`, `.bedrockConverse`, `.bedrockInvoke`, or `.auto`).
 

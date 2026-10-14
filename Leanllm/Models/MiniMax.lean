@@ -2,8 +2,8 @@ namespace Leanllm
 
 inductive MiniMaxModel where
   | m3
-  | m27
-  | m25
+  | m2_7
+  | m2_5
   | m2
   | custom (id : String)
   deriving Repr, BEq, Inhabited
@@ -12,8 +12,8 @@ namespace MiniMaxModel
 
 def toModelId : MiniMaxModel → String
   | .m3        => "minimax-m3"
-  | .m27       => "minimax-m2.7"
-  | .m25       => "minimax-m2.5"
+  | .m2_7      => "minimax-m2.7"
+  | .m2_5      => "minimax-m2.5"
   | .m2        => "minimax-m2"
   | .custom id => id
 

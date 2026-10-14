@@ -78,7 +78,7 @@ def agentLoop (history : List Message) (maxSteps : Nat := 5) : LLMM String := do
 
 def main : IO Unit := do
   let cfg : ModelConfig := {
-    model     := .claude .haiku55
+    model     := .claude .haiku5_5
     tools     := [weatherTool, timeTool]
     maxTokens := some 512
   }
@@ -149,14 +149,14 @@ def draftAndCritique (topic : String) : LLMM (String × String) := do
   -- Step 1: Fast draft with Gemini 3.5 Flash (Direct Google API)
   let draft ←
     LLMM.withProvider .direct <|
-    LLMM.withModel (.gemini .flash35) <|
+    LLMM.withModel (.gemini .flash3_5) <|
     LLMM.withConfig (fun c => { c with temperature := some 0.7, maxTokens := some 512 }) <|
       ask s!"Write a short technical paragraph explaining {topic}."
 
   -- Step 2: Review using OpenAI gpt-5.4 over the Responses API on OpenRouter
   let review ←
     LLMM.withProvider (.openRouter { appName := some "leanllm-pipeline" }) <|
-    LLMM.withModel (.openai .gpt54) <|
+    LLMM.withModel (.openai .gpt5_4) <|
     LLMM.withWireApi .openaiResponses <|
       completion [
         Message.system "Check the draft for technical precision and suggest one improvement.",
@@ -166,7 +166,7 @@ def draftAndCritique (topic : String) : LLMM (String × String) := do
   return (draft, review.text)
 
 def main : IO Unit := do
-  let defaultCfg : ModelConfig := { model := .claude .sonnet55, maxTokens := some 512 }
+  let defaultCfg : ModelConfig := { model := .claude .sonnet5_5, maxTokens := some 512 }
   match ← LLMM.run defaultCfg (draftAndCritique "dependent types in Lean 4") with
   | .ok (draft, critique) =>
     IO.println s!"--- Draft ---\n{draft}\n\n--- Critique ---\n{critique}"
@@ -186,12 +186,12 @@ import Leanllm
 open Leanllm
 
 def resilientConfig : ModelConfig := {
-  model    := .claude .sonnet55
+  model    := .claude .sonnet5_5
   provider := .openRouter {
     siteUrl        := some "https://example.com"
     appName        := some "leanllm-service"
     -- If Claude Sonnet 5.5 is unavailable, OpenRouter tries these in order:
-    fallbacks      := [.claude .haiku55, .gemini .flash35, .openai .gpt4oMini]
+    fallbacks      := [.claude .haiku5_5, .gemini .flash3_5, .openai .gpt4oMini]
     -- Prefer specific upstream infrastructure providers:
     order          := ["Anthropic", "Google", "OpenAI"]
     allowFallbacks := true
@@ -219,14 +219,14 @@ open Leanllm
 
 -- AWS Bedrock Converse API (default)
 def bedrockConverseCfg : ModelConfig := {
-  model     := .claude .sonnet55
+  model     := .claude .sonnet5_5
   provider  := .bedrock { region := "us-west-2", crossRegion := true }
   maxTokens := some 512
 }
 
 -- AWS Bedrock native Anthropic Invoke payload (/model/{id}/invoke)
 def bedrockInvokeCfg : ModelConfig := {
-  model     := .claude .haiku55
+  model     := .claude .haiku5_5
   provider  := .bedrock { region := "us-east-1", crossRegion := true }
   wireApi   := .bedrockInvoke
   maxTokens := some 512
@@ -255,13 +255,13 @@ def azureCfg : ModelConfig := {
 
 ```lean
 def vertexClaudeCfg : ModelConfig := {
-  model    := .claude .sonnet55
+  model    := .claude .sonnet5_5
   provider := .vertex { projectId := "my-gcp-project", location := "us-east5" }
   maxTokens := some 512
 }
 
 def vertexGeminiCfg : ModelConfig := {
-  model    := .gemini .pro25
+  model    := .gemini .pro2_5
   provider := .vertex { projectId := "my-gcp-project", location := "us-central1" }
   maxTokens := some 512
 }
@@ -363,7 +363,7 @@ import Leanllm
 open Leanllm
 
 def runServerBatch (prompts : List String) : IO Unit := do
-  let cfg : ModelConfig := { model := .claude .haiku55, maxTokens := some 128 }
+  let cfg : ModelConfig := { model := .claude .haiku5_5, maxTokens := some 128 }
   match ← LeanHttp.Session.new with
   | .error httpErr =>
     IO.eprintln s!"Failed to initialize HTTP session: {httpErr}"

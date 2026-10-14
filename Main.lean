@@ -49,12 +49,12 @@ def main : IO Unit := do
   for (name, cfg, auth) in [
     ("DeepSeek Direct",      { model := .deepseek .v4Flash : ModelConfig },                       ResolvedAuth.apiKey "sk-ds"),
     ("Kimi Code Direct",     { model := .kimi .forCoding : ModelConfig },                         ResolvedAuth.apiKey "sk-kimi-123"),
-    ("Moonshot Kimi Direct", { model := .kimi .k25 : ModelConfig },                               ResolvedAuth.apiKey "sk-ms-123"),
-    ("Z.AI GLM Coding",      { model := .glm .glm51 : ModelConfig },                              ResolvedAuth.apiKey "sk-zai"),
+    ("Moonshot Kimi Direct", { model := .kimi .k2_5 : ModelConfig },                              ResolvedAuth.apiKey "sk-ms-123"),
+    ("Z.AI GLM Coding",      { model := .glm .glm5_1 : ModelConfig },                             ResolvedAuth.apiKey "sk-zai"),
     ("Alibaba Qwen Coding",  { model := .qwen .coderPlus : ModelConfig },                         ResolvedAuth.apiKey "sk-bailian"),
-    ("MiniMax Global",       { model := .minimax .m27 : ModelConfig },                            ResolvedAuth.apiKey "sk-mm"),
-    ("MiniMax China (cp)",   { model := .minimax .m27 : ModelConfig },                            ResolvedAuth.apiKey "sk-cp-mm"),
-    ("xAI Grok Direct",      { model := .grok .grok46 : ModelConfig },                            ResolvedAuth.apiKey "xai-123"),
+    ("MiniMax Global",       { model := .minimax .m2_7 : ModelConfig },                           ResolvedAuth.apiKey "sk-mm"),
+    ("MiniMax China (cp)",   { model := .minimax .m2_7 : ModelConfig },                           ResolvedAuth.apiKey "sk-cp-mm"),
+    ("xAI Grok Direct",      { model := .grok .grok4_6 : ModelConfig },                           ResolvedAuth.apiKey "xai-123"),
     ("Mistral Direct",       { model := .mistral .devstral : ModelConfig },                       ResolvedAuth.apiKey "mis-123")
   ] do
     let url := Transport.resolveEndpointUrlWithAuth cfg auth
@@ -62,11 +62,11 @@ def main : IO Unit := do
 
   -- 2. Live Calls across DeepSeek, Kimi, GLM, Qwen, MiniMax, Grok, and Mistral (plus OpenAI & Claude OAuth)
   let _ ← runTest "2a. DeepSeek V3.2 (via OpenRouter)"
-    { model := .deepseek .v32, provider := .openRouter { appName := some "leanllm" }, maxTokens := some 128 }
+    { model := .deepseek .v3_2, provider := .openRouter { appName := some "leanllm" }, maxTokens := some 128 }
     promptMsgs
 
   let _ ← runTest "2b. Kimi K2.5 + Tool Call (via OpenRouter)"
-    { model := .kimi .k25, provider := .openRouter { appName := some "leanllm" }, tools := [weatherTool], maxTokens := some 128 }
+    { model := .kimi .k2_5, provider := .openRouter { appName := some "leanllm" }, tools := [weatherTool], maxTokens := some 128 }
     toolMsgs
 
   let _ ← runTest "2c. Z.AI GLM-5 (via OpenRouter)"
@@ -78,11 +78,11 @@ def main : IO Unit := do
     promptMsgs
 
   let _ ← runTest "2e. MiniMax M2.5 (via OpenRouter)"
-    { model := .minimax .m25, provider := .openRouter { appName := some "leanllm" }, maxTokens := some 128 }
+    { model := .minimax .m2_5, provider := .openRouter { appName := some "leanllm" }, maxTokens := some 128 }
     promptMsgs
 
   let _ ← runTest "2f. xAI Grok Direct (grok-4.6)"
-    { model := .grok .grok46, maxTokens := some 128 }
+    { model := .grok .grok4_6, maxTokens := some 128 }
     promptMsgs
 
   let _ ← runTest "2g. Mistral Large (via OpenRouter)"
@@ -90,9 +90,9 @@ def main : IO Unit := do
     promptMsgs
 
   let _ ← runTest "2h. OpenAI Subscription OAuth (gpt-5.6-sol)"
-    { model := .openai .gpt56Sol, auth := .oauth none }
+    { model := .openai .gpt5_6Sol, auth := .oauth none }
     promptMsgs
 
   let _ ← runTest "2i. Claude Subscription OAuth (Claude Haiku 5.5)"
-    { model := .claude .haiku55, auth := .oauth none, maxTokens := some 64 }
+    { model := .claude .haiku5_5, auth := .oauth none, maxTokens := some 64 }
     promptMsgs

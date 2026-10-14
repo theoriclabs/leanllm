@@ -2,7 +2,7 @@ namespace Leanllm
 
 inductive MistralModel where
   | large4
-  | medium35
+  | medium3_5
   | small2603
   | devstral
   | custom (id : String)
@@ -12,7 +12,7 @@ namespace MistralModel
 
 def toModelId : MistralModel → String
   | .large4    => "mistral-large-4-0"
-  | .medium35  => "mistral-medium-3-5"
+  | .medium3_5 => "mistral-medium-3-5"
   | .small2603 => "mistral-small-2603"
   | .devstral  => "devstral-2512"
   | .custom id => id

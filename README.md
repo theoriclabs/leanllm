@@ -2,7 +2,7 @@
 
 **A unified LLM client library for Lean 4, backed by [LeanHttp](https://github.com/theoriclabs/leanhttp).**
 
-[![Release](https://img.shields.io/badge/release-v0.1.0-3178c6)](https://github.com/theoriclabs/leanllm/releases)
+[![Release](https://img.shields.io/badge/release-v0.2.0-3178c6)](https://github.com/theoriclabs/leanllm/releases)
 [![Lean](https://img.shields.io/badge/Lean-v4.34.1-555555)](https://lean-lang.org)
 
 `leanllm` provides a single typed interface for Anthropic Claude, OpenAI, Google Gemini, DeepSeek, Kimi/Moonshot, Z.AI GLM, Qwen, MiniMax, xAI Grok, and Mistral models across direct vendor APIs, subscription OAuth sessions (Claude Code, OpenAI Codex/ChatGPT, Gemini Code Assist, Antigravity, GitHub Copilot, Grok Build), OpenRouter, AWS Bedrock, Azure OpenAI, Google Vertex AI, and local OpenAI-compatible servers.
@@ -15,7 +15,7 @@ Add `leanllm` to your `lakefile.toml`:
 [[require]]
 name = "leanllm"
 git = "https://github.com/theoriclabs/leanllm"
-rev = "v0.1.0"
+rev = "v0.2.0"
 ```
 
 Requires Lean `v4.34.1` and `libcurl` at runtime (loaded dynamically by `leanhttp`).
@@ -33,7 +33,7 @@ open Leanllm
 
 def main : IO Unit := do
   let cfg : ModelConfig := {
-    model     := .claude .sonnet55
+    model     := .claude .sonnet5_5
     maxTokens := some 256
   }
   match ← LLMM.run cfg (ask "Explain the Curry-Howard correspondence in two sentences.") with
@@ -81,7 +81,7 @@ import Leanllm
 open Leanllm
 
 def stream : IO Unit := do
-  let cfg : ModelConfig := { model := .gemini .flash35, maxTokens := some 256 }
+  let cfg : ModelConfig := { model := .gemini .flash3_5, maxTokens := some 256 }
   match ← LLMM.run cfg (askStream "Count from 1 to 5." IO.print) with
   | .ok _      => IO.println ""
   | .error err => IO.eprintln s!"\nStream error: {repr err}"
@@ -98,16 +98,16 @@ open Leanllm
 
 -- Direct Google Gemini (reads GEMINI_API_KEY or GOOGLE_API_KEY)
 def geminiCfg : ModelConfig :=
-  { model := .gemini .flash35, maxTokens := some 256 }
+  { model := .gemini .flash3_5, maxTokens := some 256 }
 
 -- Any model via OpenRouter (reads OPENROUTER_API_KEY)
 def openRouterCfg : ModelConfig :=
-  { model    := .claude .haiku55
+  { model    := .claude .haiku5_5
     provider := .openRouter { appName := some "my-lean-app" } }
 
 -- OpenAI /v1/responses endpoint instead of /v1/chat/completions
 def responsesCfg : ModelConfig :=
-  { model   := .openai .gpt54
+  { model   := .openai .gpt5_4
     wireApi := .openaiResponses }
 
 -- Local Ollama or vLLM server (no API key required)
@@ -139,7 +139,7 @@ def weatherTool : ToolSpec := {
 
 def checkWeather : IO Unit := do
   let cfg : ModelConfig := {
-    model     := .claude .haiku55
+    model     := .claude .haiku5_5
     tools     := [weatherTool]
     maxTokens := some 256
   }
@@ -152,38 +152,22 @@ def checkWeather : IO Unit := do
     IO.eprintln s!"Error: {repr err}"
 ```
 
-### 6. One-shot call without `LLMM`
-
-If you only need a single request and do not want the `LLMM` reader monad, call `Leanllm.call` or `Leanllm.callStream` directly in `ExceptT LLMError IO`:
-
-```lean
-import Leanllm
-
-open Leanllm
-
-def oneShot : IO Unit := do
-  let cfg : ModelConfig := { model := .claude .haiku55, maxTokens := some 64 }
-  match ← (Leanllm.call cfg [Message.user "What is 2 + 2?"]).run with
-  | .ok resp   => IO.println resp.text
-  | .error err => IO.eprintln s!"Error: {repr err}"
-```
-
 ## Supported models and providers
 
 ### Models
 
 | Family | Constructor | Built-in variants |
 | --- | --- | --- |
-| Anthropic Claude | `Model.claude` | `.opus55`, `.sonnet55`, `.haiku55`, `.fable51`, `.opus5`, `.sonnet5`, `.opus45`, `.sonnet45`, `.haiku45`, `.custom id` |
-| OpenAI | `Model.openai` | `.gpt6Astra`, `.gpt56Sol`, `.gpt56Terra`, `.gpt56Luna`, `.gpt55`, `.gpt54`, `.gpt4o`, `.gpt4oMini`, `.o3`, `.o4Mini`, `.custom id` |
-| Google Gemini | `Model.gemini` | `.argon4`, `.flash38`, `.flash35`, `.pro25`, `.flash25`, `.custom id` |
-| DeepSeek | `Model.deepseek` | `.v41Flash`, `.v4Pro`, `.v4Flash`, `.v32`, `.chat`, `.reasoner`, `.custom id` |
-| Kimi / Moonshot | `Model.kimi` | `.k3`, `.k27Code`, `.k26`, `.k25`, `.k2Thinking`, `.forCoding`, `.custom id` |
-| Z.AI GLM | `Model.glm` | `.glm53Prime`, `.glm53`, `.glm53Flash`, `.glm52`, `.glm51`, `.glm5`, `.glm47`, `.glm47Flash`, `.custom id` |
-| Qwen | `Model.qwen` | `.qwen38Max`, `.qwen38Flash`, `.qwen37Max`, `.qwen37Plus`, `.qwen35Plus`, `.coderNext`, `.coderPlus`, `.custom id` |
-| MiniMax | `Model.minimax` | `.m3`, `.m27`, `.m25`, `.m2`, `.custom id` |
-| xAI Grok | `Model.grok` | `.grok47`, `.grok46`, `.grok45`, `.grok43`, `.grokBuild01`, `.codeFast1`, `.custom id` |
-| Mistral | `Model.mistral` | `.large4`, `.medium35`, `.small2603`, `.devstral`, `.custom id` |
+| Anthropic Claude | `Model.claude` | `.opus5_5`, `.sonnet5_5`, `.haiku5_5`, `.fable5_1`, `.opus5`, `.sonnet5`, `.opus4_5`, `.sonnet4_5`, `.haiku4_5`, `.custom id` |
+| OpenAI | `Model.openai` | `.gpt6Astra`, `.gpt5_6Sol`, `.gpt5_6Terra`, `.gpt5_6Luna`, `.gpt5_5`, `.gpt5_4`, `.gpt4o`, `.gpt4oMini`, `.o3`, `.o4Mini`, `.custom id` |
+| Google Gemini | `Model.gemini` | `.argon4`, `.flash3_8`, `.flash3_5`, `.pro2_5`, `.flash2_5`, `.custom id` |
+| DeepSeek | `Model.deepseek` | `.v4_1Flash`, `.v4Pro`, `.v4Flash`, `.v3_2`, `.chat`, `.reasoner`, `.custom id` |
+| Kimi / Moonshot | `Model.kimi` | `.k3`, `.k2_7Code`, `.k2_6`, `.k2_5`, `.k2Thinking`, `.forCoding`, `.custom id` |
+| Z.AI GLM | `Model.glm` | `.glm5_3Prime`, `.glm5_3`, `.glm5_3Flash`, `.glm5_2`, `.glm5_1`, `.glm5`, `.glm4_7`, `.glm4_7Flash`, `.custom id` |
+| Qwen | `Model.qwen` | `.qwen3_8Max`, `.qwen3_8Flash`, `.qwen3_7Max`, `.qwen3_7Plus`, `.qwen3_5Plus`, `.coderNext`, `.coderPlus`, `.custom id` |
+| MiniMax | `Model.minimax` | `.m3`, `.m2_7`, `.m2_5`, `.m2`, `.custom id` |
+| xAI Grok | `Model.grok` | `.grok4_7`, `.grok4_6`, `.grok4_5`, `.grok4_3`, `.grokBuild0_1`, `.codeFast1`, `.custom id` |
+| Mistral | `Model.mistral` | `.large4`, `.medium3_5`, `.small2603`, `.devstral`, `.custom id` |
 
 ### Providers and environment variables
 

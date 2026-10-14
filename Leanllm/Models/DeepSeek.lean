@@ -1,10 +1,10 @@
 namespace Leanllm
 
 inductive DeepSeekModel where
-  | v41Flash
+  | v4_1Flash
   | v4Pro
   | v4Flash
-  | v32
+  | v3_2
   | chat
   | reasoner
   | custom (id : String)
@@ -13,10 +13,10 @@ inductive DeepSeekModel where
 namespace DeepSeekModel
 
 def toModelId : DeepSeekModel → String
-  | .v41Flash  => "deepseek-v4.1-flash"
+  | .v4_1Flash => "deepseek-v4.1-flash"
   | .v4Pro     => "deepseek-v4-pro"
   | .v4Flash   => "deepseek-v4-flash"
-  | .v32       => "deepseek-v3.2"
+  | .v3_2      => "deepseek-v3.2"
   | .chat      => "deepseek-chat"
   | .reasoner  => "deepseek-reasoner"
   | .custom id => id
