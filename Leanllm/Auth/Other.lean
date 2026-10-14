@@ -15,8 +15,9 @@ private def getInt? (j : Json) (k : String) : Option Int :=
 /-! ## 1. Google Gemini Code Assist & Antigravity Subscription OAuth -/
 
 def googleTokenUrl : String := "https://oauth2.googleapis.com/token"
+def codeAssistEndpoint : String := "https://cloudcode-pa.googleapis.com/v1internal"
+def antigravityEndpoint : String := "https://daily-cloudcode-pa.googleapis.com/v1internal"
 
-/-- Google OAuth client id and secret are not stored in the repo. Set these before a token refresh. -/
 private def requireEnv (name : String) : ExceptT LLMError IO String := do
   match ← liftM (IO.getEnv name) with
   | some v =>
@@ -25,10 +26,13 @@ private def requireEnv (name : String) : ExceptT LLMError IO String := do
     return v
   | none =>
     throw (.auth .missingApiKey s!"Set {name} to refresh Google OAuth tokens")
-def codeAssistEndpoint : String := "https://cloudcode-pa.googleapis.com/v1internal"
-def antigravityEndpoint : String := "https://daily-cloudcode-pa.googleapis.com/v1internal"
 
 def loadGeminiOAuthFromDisk : IO (Option OAuthCredentials) := do
+  -- Check ~/.gemini/oauth_creds.json first for id_token / client_id metadata
+  let mut fallbackClientId : Option String := none
+  if let some cliPath ← Auth.userHomePath ".gemini/oauth_creds.json" then
+    if let some j ← Auth.readJsonFile? cliPath then
+      fallbackClientId := (getStr? j "client_id").or (getStr? j "id_token" >>= Auth.jwtClientId?)
   -- 1. ~/.jcode/gemini_oauth.json
   if let some jcodePath ← Auth.userHomePath ".jcode/gemini_oauth.json" then
     if let some j ← Auth.readJsonFile? jcodePath then
@@ -36,6 +40,7 @@ def loadGeminiOAuthFromDisk : IO (Option OAuthCredentials) := do
         return some {
           accessToken  := access
           refreshToken := (getStr? j "refresh_token").getD ""
+          clientId     := (getStr? j "client_id").or fallbackClientId
           expiresAtMs  := getInt? j "expires_at"
           email        := getStr? j "email"
           source       := some (.jcodeGeminiFile jcodePath)
@@ -44,9 +49,12 @@ def loadGeminiOAuthFromDisk : IO (Option OAuthCredentials) := do
   if let some cliPath ← Auth.userHomePath ".gemini/oauth_creds.json" then
     if let some j ← Auth.readJsonFile? cliPath then
       if let some access := getStr? j "access_token" then
+        let idToken := getStr? j "id_token"
         return some {
           accessToken  := access
           refreshToken := (getStr? j "refresh_token").getD ""
+          idToken
+          clientId     := (getStr? j "client_id").or (idToken >>= Auth.jwtClientId?)
           expiresAtMs  := (getInt? j "expiry_date").or (getInt? j "expires_at")
           source       := some (.geminiCliFile cliPath)
         }
@@ -56,9 +64,12 @@ def loadAntigravityOAuthFromDisk : IO (Option OAuthCredentials) := do
   let some path ← Auth.userHomePath ".jcode/antigravity_oauth.json" | return none
   let some j ← Auth.readJsonFile? path | return none
   let some access := getStr? j "access_token" | return none
+  let idToken := getStr? j "id_token"
   return some {
     accessToken  := access
     refreshToken := (getStr? j "refresh_token").getD ""
+    idToken
+    clientId     := (getStr? j "client_id").or (idToken >>= Auth.jwtClientId?)
     expiresAtMs  := getInt? j "expires_at"
     email        := getStr? j "email"
     projectId    := getStr? j "project_id"
@@ -102,7 +113,6 @@ def refreshGoogleOAuth (clientId clientSecret : String) (creds : OAuthCredential
       refreshToken := newRefresh
       expiresAtMs  := some (now + expiresInSecs * 1000)
     }
-    -- Save back if from jcode file
     if let some (.jcodeGeminiFile path) := creds.source then
       liftM <| Auth.writeJsonFileAtomic path (Json.mkObj [
         ("access_token", toJson refreshed.accessToken),
@@ -166,7 +176,9 @@ def loadAndEnsureFreshGemini (session : Option Session := none) :
     | throw (.auth .missingApiKey "No Gemini OAuth credentials found in ~/.jcode/gemini_oauth.json or ~/.gemini/oauth_creds.json")
   let now ← liftM Auth.nowMs
   let fresh ← if creds.needsRefresh now 60000 then
-      let clientId ← requireEnv "LEANLLM_GEMINI_OAUTH_CLIENT_ID"
+      let clientId ← match creds.clientId with
+        | some cid => pure cid
+        | none     => requireEnv "LEANLLM_GEMINI_OAUTH_CLIENT_ID"
       let clientSecret ← requireEnv "LEANLLM_GEMINI_OAUTH_CLIENT_SECRET"
       refreshGoogleOAuth clientId clientSecret creds session
     else
@@ -182,7 +194,9 @@ def loadAndEnsureFreshAntigravity (session : Option Session := none) :
     | throw (.auth .missingApiKey "No Antigravity OAuth credentials found in ~/.jcode/antigravity_oauth.json")
   let now ← liftM Auth.nowMs
   let fresh ← if creds.needsRefresh now 60000 then
-      let clientId ← requireEnv "LEANLLM_ANTIGRAVITY_OAUTH_CLIENT_ID"
+      let clientId ← match creds.clientId with
+        | some cid => pure cid
+        | none     => requireEnv "LEANLLM_ANTIGRAVITY_OAUTH_CLIENT_ID"
       let clientSecret ← requireEnv "LEANLLM_ANTIGRAVITY_OAUTH_CLIENT_SECRET"
       refreshGoogleOAuth clientId clientSecret creds session
     else
@@ -241,36 +255,52 @@ def exchangeCopilotBearerToken (session : Option Session := none) : ExceptT LLME
 
 /-! ## 3. xAI Grok Build Subscription OIDC (`~/.grok/auth.json`) -/
 
-def grokClientId : String := "b1a00492-073a-47ea-816f-4c329264a828"
-def grokScopeKey : String := s!"https://auth.x.ai::{grokClientId}"
+private def findGrokOidcEntry (root : Json) : Option (String × Json) := do
+  let kv ← root.getObj?.toOption
+  kv.toList.find? fun (scopeKey, entry) =>
+    scopeKey.startsWith "https://auth.x.ai::" || getStr? entry "auth_mode" == some "oidc"
 
 def loadAndEnsureFreshGrok (session : Option Session := none) : ExceptT LLMError IO OAuthCredentials := do
   let some path ← liftM (Auth.userHomePath ".grok/auth.json")
     | throw (.auth .missingApiKey "Cannot resolve ~/.grok/auth.json")
   let some root ← liftM (Auth.readJsonFile? path)
     | throw (.auth .missingApiKey "No Grok Build credentials found in ~/.grok/auth.json")
-  let .ok entry := root.getObjVal? grokScopeKey
-    | throw (.auth .missingApiKey s!"No OIDC scope '{grokScopeKey}' in ~/.grok/auth.json")
+  let some (scopeKey, entry) := findGrokOidcEntry root
+    | throw (.auth .missingApiKey "No OIDC scope entry found in ~/.grok/auth.json")
   let some key := getStr? entry "key"
     | throw (.auth .missingApiKey "Missing 'key' in ~/.grok/auth.json")
+  let scopeClientId := match scopeKey.splitOn "::" with
+    | [_, cid] => if cid.isEmpty then none else some cid
+    | _        => none
+  let clientId := (getStr? entry "oidc_client_id")
+    |>.or scopeClientId
+    |>.or (Auth.jwtClientId? key)
   let refresh := (getStr? entry "refresh_token").getD ""
   let expiresAtMs := Auth.jwtExpiresAtMs? key
   let creds : OAuthCredentials := {
     accessToken  := key
     refreshToken := refresh
+    clientId
     expiresAtMs
     source       := some (.grokAuthFile path)
   }
   let now ← liftM Auth.nowMs
   if !creds.needsRefresh now 60000 then
     return creds
+  let resolvedClientId ← match creds.clientId with
+    | some cid => pure cid
+    | none     =>
+      if let some envCid ← liftM (Auth.firstEnvVar? ["LEANLLM_GROK_CLIENT_ID"]) then
+        pure envCid
+      else
+        throw (.auth .missingApiKey "Missing oidc_client_id in ~/.grok/auth.json; set LEANLLM_GROK_CLIENT_ID")
   let req : Request := {
     method := .post
     uri    := .absolute uri!"https://auth.x.ai/oauth2/token"
     body   := .form [
       ("grant_type", "refresh_token"),
       ("refresh_token", creds.refreshToken),
-      ("client_id", grokClientId)
+      ("client_id", resolvedClientId)
     ]
   }
   let outcome : Outcome Json ← liftM <| match session with

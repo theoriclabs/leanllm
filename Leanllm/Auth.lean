@@ -35,6 +35,7 @@ structure OAuthCredentials where
   accessToken      : String
   refreshToken     : String                  := ""
   idToken          : Option String           := none
+  clientId         : Option String           := none
   accountId        : Option String           := none
   email            : Option String           := none
   expiresAtMs      : Option Int              := none
@@ -56,6 +57,12 @@ inductive ResolvedAuth where
   | bearer          (token : String)
   deriving Repr, BEq, Inhabited
 
+/-- Whether an `OAuthCredentials` bundle is expired or within `skewMs` of expiring. -/
+def OAuthCredentials.needsRefresh (creds : OAuthCredentials) (currentMs : Int) (skewMs : Int := 60000) : Bool :=
+  match creds.expiresAtMs with
+  | some exp => exp <= currentMs + skewMs && !creds.refreshToken.isEmpty
+  | none     => false
+
 namespace Auth
 
 /-- Current UNIX epoch time in milliseconds. -/
@@ -63,16 +70,19 @@ def nowMs : IO Int := do
   let ts ← Std.Time.Timestamp.now
   return ts.toMillisecondsSinceUnixEpoch.val
 
-/-- Whether an `OAuthCredentials` bundle is expired or within `skewMs` of expiring. -/
-def OAuthCredentials.needsRefresh (creds : OAuthCredentials) (currentMs : Int) (skewMs : Int := 60000) : Bool :=
-  match creds.expiresAtMs with
-  | some exp => exp <= currentMs + skewMs && !creds.refreshToken.isEmpty
-  | none     => false
-
 /-- Resolve a path relative to the user's home directory (`$HOME`). -/
 def userHomePath (rel : String) : IO (Option System.FilePath) := do
   let some home ← IO.getEnv "HOME" | return none
   return some (System.FilePath.mk home / rel)
+
+/-- Read the first non-empty environment variable from `names`. -/
+def firstEnvVar? (names : List String) : IO (Option String) := do
+  for name in names do
+    if let some val ← IO.getEnv name then
+      let trimmed := val.trimAscii.toString
+      if !trimmed.isEmpty then
+        return some trimmed
+  return none
 
 /-- Read and parse a JSON file if it exists on disk. -/
 def readJsonFile? (path : System.FilePath) : IO (Option Json) := do
@@ -144,6 +154,21 @@ def jwtExpiresAtMs? (token : String) : Option Int := do
 def jwtEmail? (token : String) : Option String := do
   let payload ← decodeJwtPayload? token
   (payload.getObjValAs? String "email").toOption
+
+/-- Extract the OAuth `client_id` from a JWT (`client_id`, `azp`, or non-URL `aud` claim). -/
+def jwtClientId? (token : String) : Option String := do
+  let payload ← decodeJwtPayload? token
+  if let .ok cid := payload.getObjValAs? String "client_id" then
+    if !cid.isEmpty then return cid
+  if let .ok azp := payload.getObjValAs? String "azp" then
+    if !azp.isEmpty then return azp
+  if let .ok aud := payload.getObjValAs? String "aud" then
+    if !aud.isEmpty && !aud.startsWith "http://" && !aud.startsWith "https://" then
+      return aud
+  if let .ok (audArr : Array String) := payload.getObjValAs? (Array String) "aud" then
+    if let some first := audArr.find? (fun a => !a.isEmpty && !a.startsWith "http://" && !a.startsWith "https://") then
+      return first
+  none
 
 /-- Extract `chatgpt_account_id` from an OpenAI `id_token` or `access_token` JWT. -/
 def jwtChatGptAccountId? (token : String) : Option String := do

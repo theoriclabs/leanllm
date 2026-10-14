@@ -1,7 +1,11 @@
 namespace Leanllm
 
 inductive OpenAIModel where
+  | gpt6Astra
   | gpt56Sol
+  | gpt56Terra
+  | gpt56Luna
+  | gpt55
   | gpt54
   | gpt4o
   | gpt4oMini
@@ -13,7 +17,11 @@ inductive OpenAIModel where
 namespace OpenAIModel
 
 def toModelId : OpenAIModel → String
+  | .gpt6Astra  => "gpt-6-astra"
   | .gpt56Sol   => "gpt-5.6-sol"
+  | .gpt56Terra => "gpt-5.6-terra"
+  | .gpt56Luna  => "gpt-5.6-luna"
+  | .gpt55      => "gpt-5.5"
   | .gpt54      => "gpt-5.4"
   | .gpt4o      => "gpt-4o"
   | .gpt4oMini  => "gpt-4o-mini"

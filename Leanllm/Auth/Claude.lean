@@ -6,7 +6,6 @@ namespace Leanllm.Auth.Claude
 
 open Lean LeanHttp Std.Http
 
-def clientId : String := "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 def tokenUrl : String := "https://platform.claude.com/v1/oauth/token"
 def oauthMessagesUrl : String := "https://api.anthropic.com/v1/messages?beta=true"
 def refreshScopes : String := "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
@@ -59,17 +58,30 @@ private def parseClaudeOAuthObj (j : Json) (source : CredentialSource) : Option 
   let obj := (j.getObjVal? "claudeAiOauth").toOption.getD j
   let accessToken ← (getStr? obj "accessToken").or (getStr? obj "access")
   let refreshToken := (getStr? obj "refreshToken").or (getStr? obj "refresh") |>.getD ""
+  let clientId := (getStr? obj "clientId")
+    |>.or (getStr? obj "client_id")
+    |>.or (Auth.jwtClientId? accessToken)
   let expiresAtMs := (getInt? obj "expiresAt").or (getInt? obj "expires")
   let subscriptionType := (getStr? obj "subscriptionType").or (getStr? obj "subscription_type")
   let scopes := parseScopes obj "scopes"
   return {
     accessToken
     refreshToken
+    clientId
     expiresAtMs
     subscriptionType
     scopes
     source := some source
   }
+
+/-- Resolve the Claude OAuth `client_id` from `creds` or environment variables. -/
+def resolveClientId (creds : OAuthCredentials) : ExceptT LLMError IO String := do
+  if let some cid := creds.clientId then
+    if !cid.isEmpty then return cid
+  if let some envCid ← liftM (Auth.firstEnvVar? ["LEANLLM_CLAUDE_CLIENT_ID", "CLAUDE_OAUTH_CLIENT_ID"]) then
+    return envCid
+  throw (.auth .missingApiKey
+    "Claude OAuth token is expired and no client_id is configured; set LEANLLM_CLAUDE_CLIENT_ID")
 
 /-- Load Claude OAuth credentials from `$CLAUDE_CODE_OAUTH_TOKEN`. -/
 def loadFromEnv : IO (Option OAuthCredentials) := do
@@ -94,7 +106,7 @@ def loadFromJcodeFile (requestedAccount : Option String := none) : IO (Option OA
     | none       => accounts[0]?
   let some acc := chosen | return none
   let label := (getStr? acc "label").getD "claude-1"
-  parseClaudeOAuthObj acc (.jcodeClaudeFile path label)
+  return parseClaudeOAuthObj acc (.jcodeClaudeFile path label)
 
 /-- Load Claude OAuth credentials from `~/.claude/.credentials.json`. -/
 def loadFromClaudeCodeFile : IO (Option OAuthCredentials) := do
@@ -154,7 +166,7 @@ def saveRefreshedCredentials (creds : OAuthCredentials) : IO Unit := do
       Auth.writeJsonFileAtomic path (root.setObjVal! "claudeAiOauth" inner)
   | _ => pure ()
 
-private def sendRefreshRequest (refreshToken : String) (scope : Option String) (session : Option Session) :
+private def sendRefreshRequest (clientId refreshToken : String) (scope : Option String) (session : Option Session) :
     IO (Outcome Json) := do
   let fields : List (String × Json) :=
     [("grant_type", toJson "refresh_token"),
@@ -176,12 +188,13 @@ def refreshCredentials (creds : OAuthCredentials) (session : Option Session := n
     ExceptT LLMError IO OAuthCredentials := do
   if creds.refreshToken.isEmpty then
     throw (.auth .invalidApiKey "Claude OAuth token is expired and has no refresh_token")
-  let firstOutcome ← liftM <| sendRefreshRequest creds.refreshToken (some refreshScopes) session
+  let clientId ← resolveClientId creds
+  let firstOutcome ← liftM <| sendRefreshRequest clientId creds.refreshToken (some refreshScopes) session
   let outcome ← match firstOutcome with
     | .status resp =>
       let body := (String.fromUTF8? resp.body).getD ""
       if body.contains "invalid_scope" || body.contains "scope" then
-        liftM <| sendRefreshRequest creds.refreshToken none session
+        liftM <| sendRefreshRequest clientId creds.refreshToken none session
       else
         pure firstOutcome
     | other => pure other

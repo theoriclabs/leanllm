@@ -6,7 +6,6 @@ namespace Leanllm.Auth.OpenAI
 
 open Lean LeanHttp Std.Http
 
-def clientId : String := "app_EMoamEEZ73f0CkXaXp7hrann"
 def tokenUrl : String := "https://auth.openai.com/oauth/token"
 def chatGptResponsesUrl : String := "https://chatgpt.com/backend-api/codex/responses"
 def originator : String := "codex_cli_rs"
@@ -18,6 +17,9 @@ private def getInt? (j : Json) (k : String) : Option Int :=
   (j.getObjValAs? Int k).toOption
 
 private def enrichFromJwt (creds : OAuthCredentials) : OAuthCredentials :=
+  let clientId := creds.clientId
+    |>.or (Auth.jwtClientId? creds.accessToken)
+    |>.or (creds.idToken >>= Auth.jwtClientId?)
   let accountId := creds.accountId
     |>.or (creds.idToken >>= Auth.jwtChatGptAccountId?)
     |>.or (Auth.jwtChatGptAccountId? creds.accessToken)
@@ -26,7 +28,16 @@ private def enrichFromJwt (creds : OAuthCredentials) : OAuthCredentials :=
     |>.or (Auth.jwtEmail? creds.accessToken)
   let expiresAtMs := creds.expiresAtMs
     |>.or (Auth.jwtExpiresAtMs? creds.accessToken)
-  { creds with accountId, email, expiresAtMs }
+  { creds with clientId, accountId, email, expiresAtMs }
+
+/-- Resolve the OAuth `client_id` from `creds` (decoded from the JWT or stored JSON) or environment variables. -/
+def resolveClientId (creds : OAuthCredentials) : ExceptT LLMError IO String := do
+  if let some cid := creds.clientId then
+    if !cid.isEmpty then return cid
+  if let some envCid ← liftM (Auth.firstEnvVar? ["LEANLLM_OPENAI_CLIENT_ID", "OPENAI_OAUTH_CLIENT_ID"]) then
+    return envCid
+  throw (.auth .missingApiKey
+    "Could not determine OpenAI OAuth client_id from JWT claims; set LEANLLM_OPENAI_CLIENT_ID")
 
 /-- Load OpenAI OAuth credentials from `~/.jcode/openai-auth.json`. -/
 def loadFromJcodeFile (requestedAccount : Option String := none) : IO (Option OAuthCredentials) := do
@@ -46,6 +57,7 @@ def loadFromJcodeFile (requestedAccount : Option String := none) : IO (Option OA
     accessToken
     refreshToken
     idToken     := getStr? acc "id_token"
+    clientId    := getStr? acc "client_id"
     accountId   := getStr? acc "account_id"
     email       := getStr? acc "email"
     expiresAtMs := getInt? acc "expires_at"
@@ -65,6 +77,7 @@ def loadFromCodexCliFile : IO (Option OAuthCredentials) := do
     accessToken
     refreshToken
     idToken     := getStr? tokObj "id_token"
+    clientId    := (getStr? tokObj "client_id").or (getStr? root "client_id")
     accountId   := getStr? tokObj "account_id"
     expiresAtMs := getInt? tokObj "expires_at"
     source      := some (.codexCliFile path)
@@ -82,6 +95,7 @@ def loadFromOpenCodeFile : IO (Option OAuthCredentials) := do
           return some <| enrichFromJwt {
             accessToken
             refreshToken
+            clientId    := getStr? entry "client_id"
             expiresAtMs := (getInt? entry "expires").or (getInt? entry "expires_at")
             source      := some (.opencodeFile path key)
           }
@@ -123,6 +137,7 @@ def refreshCredentials (creds : OAuthCredentials) (session : Option Session := n
     ExceptT LLMError IO OAuthCredentials := do
   if creds.refreshToken.isEmpty then
     throw (.auth .invalidApiKey "OpenAI OAuth token is expired and has no refresh_token")
+  let clientId ← resolveClientId creds
   let some uri := URI.parse? tokenUrl
     | throw (.invalidRequest (.malformedParameters tokenUrl) "Invalid OpenAI token URL")
   let req : Request := {
