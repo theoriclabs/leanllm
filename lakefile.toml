@@ -2,6 +2,11 @@ name = "leanllm"
 version = "0.1.0"
 defaultTargets = ["leanllm"]
 
+[[require]]
+name = "leanhttp"
+git = "https://github.com/theoriclabs/leanhttp"
+rev = "v0.4.0"
+
 [[lean_lib]]
 name = "Leanllm"
 

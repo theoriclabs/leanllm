@@ -113,9 +113,9 @@ def supportsModel : Provider → Model → Bool
 def resolveModelId (provider : Provider) (model : Model) : String :=
   match provider, model with
   | .direct, m => m.toModelId
-  | .openRouter _, .claude m => s!"anthropic/{m.toModelId}"
-  | .openRouter _, .openai m => s!"openai/{m.toModelId}"
-  | .openRouter _, .gemini m => s!"google/{m.toModelId}"
+  | .openRouter _, .claude m => m.toOpenRouterSlug
+  | .openRouter _, .openai m => m.toOpenRouterSlug
+  | .openRouter _, .gemini m => m.toOpenRouterSlug
   | .bedrock cfg, .claude m =>
     let prefixStr := if cfg.crossRegion then "us." else ""
     s!"{prefixStr}anthropic.{m.toModelId}-v1:0"
