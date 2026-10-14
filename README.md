@@ -2,9 +2,10 @@
 
 **A unified LLM client library for Lean 4, backed by [LeanHttp](https://github.com/theoriclabs/leanhttp).**
 
+[![Release](https://img.shields.io/badge/release-v0.1.0-3178c6)](https://github.com/theoriclabs/leanllm/releases)
 [![Lean](https://img.shields.io/badge/Lean-v4.34.1-555555)](https://lean-lang.org)
 
-`leanllm` provides a single typed interface for Anthropic Claude, OpenAI, and Google Gemini models across direct vendor APIs, OpenRouter, AWS Bedrock, Azure OpenAI, Google Vertex AI, and local OpenAI-compatible servers.
+`leanllm` provides a single typed interface for Anthropic Claude, OpenAI, Google Gemini, DeepSeek, Kimi/Moonshot, Z.AI GLM, Qwen, MiniMax, xAI Grok, and Mistral models across direct vendor APIs, subscription OAuth sessions (Claude Code, OpenAI Codex/ChatGPT, Gemini Code Assist, Antigravity, GitHub Copilot, Grok Build), OpenRouter, AWS Bedrock, Azure OpenAI, Google Vertex AI, and local OpenAI-compatible servers.
 
 ## Install
 
@@ -14,7 +15,7 @@ Add `leanllm` to your `lakefile.toml`:
 [[require]]
 name = "leanllm"
 git = "https://github.com/theoriclabs/leanllm"
-rev = "main"
+rev = "v0.1.0"
 ```
 
 Requires Lean `v4.34.1` and `libcurl` at runtime (loaded dynamically by `leanhttp`).
@@ -174,8 +175,15 @@ def oneShot : IO Unit := do
 | Family | Constructor | Built-in variants |
 | --- | --- | --- |
 | Anthropic Claude | `Model.claude` | `.opus55`, `.sonnet55`, `.haiku55`, `.fable51`, `.opus5`, `.sonnet5`, `.opus45`, `.sonnet45`, `.haiku45`, `.custom id` |
-| OpenAI | `Model.openai` | `.gpt56Sol`, `.gpt54`, `.gpt4o`, `.gpt4oMini`, `.o3`, `.o4Mini`, `.custom id` |
+| OpenAI | `Model.openai` | `.gpt6Astra`, `.gpt56Sol`, `.gpt56Terra`, `.gpt56Luna`, `.gpt55`, `.gpt54`, `.gpt4o`, `.gpt4oMini`, `.o3`, `.o4Mini`, `.custom id` |
 | Google Gemini | `Model.gemini` | `.argon4`, `.flash38`, `.flash35`, `.pro25`, `.flash25`, `.custom id` |
+| DeepSeek | `Model.deepseek` | `.v41Flash`, `.v4Pro`, `.v4Flash`, `.v32`, `.chat`, `.reasoner`, `.custom id` |
+| Kimi / Moonshot | `Model.kimi` | `.k3`, `.k27Code`, `.k26`, `.k25`, `.k2Thinking`, `.forCoding`, `.custom id` |
+| Z.AI GLM | `Model.glm` | `.glm53Prime`, `.glm53`, `.glm53Flash`, `.glm52`, `.glm51`, `.glm5`, `.glm47`, `.glm47Flash`, `.custom id` |
+| Qwen | `Model.qwen` | `.qwen38Max`, `.qwen38Flash`, `.qwen37Max`, `.qwen37Plus`, `.qwen35Plus`, `.coderNext`, `.coderPlus`, `.custom id` |
+| MiniMax | `Model.minimax` | `.m3`, `.m27`, `.m25`, `.m2`, `.custom id` |
+| xAI Grok | `Model.grok` | `.grok47`, `.grok46`, `.grok45`, `.grok43`, `.grokBuild01`, `.codeFast1`, `.custom id` |
+| Mistral | `Model.mistral` | `.large4`, `.medium35`, `.small2603`, `.devstral`, `.custom id` |
 
 ### Providers and environment variables
 

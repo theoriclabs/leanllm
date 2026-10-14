@@ -12,33 +12,76 @@ namespace Leanllm.Transport
 
 open Lean LeanHttp Std.Http
 
+/-- Default environment variable names and jcode `.env` file names for API keys per `(Provider, Model)`. -/
+def apiKeyEnvVarsAndFile (provider : Provider) (model : Model) : (List String × Option String) :=
+  match provider, model with
+  | .direct, .claude _          => (["ANTHROPIC_API_KEY"], some "anthropic.env")
+  | .direct, .openai _          => (["OPENAI_API_KEY"], some "openai.env")
+  | .direct, .gemini _          => (["GEMINI_API_KEY", "GOOGLE_API_KEY"], some "gemini.env")
+  | .direct, .deepseek _        => (["DEEPSEEK_API_KEY"], some "deepseek.env")
+  | .direct, .kimi .forCoding   => (["KIMI_API_KEY", "MOONSHOT_API_KEY"], some "kimi.env")
+  | .direct, .kimi _            => (["MOONSHOT_API_KEY", "KIMI_API_KEY"], some "moonshotai.env")
+  | .direct, .glm _             => (["ZHIPU_API_KEY", "ZAI_API_KEY"], some "zai.env")
+  | .direct, .qwen _            => (["BAILIAN_CODING_PLAN_API_KEY", "DASHSCOPE_API_KEY"], some "alibaba-coding-plan.env")
+  | .direct, .minimax _         => (["MINIMAX_API_KEY"], some "minimax.env")
+  | .direct, .grok _            => (["XAI_API_KEY", "GROK_DEPLOYMENT_KEY"], some "xai.env")
+  | .direct, .mistral _         => (["MISTRAL_API_KEY"], some "mistral.env")
+  | .openRouter _, _            => (["OPENROUTER_API_KEY"], some "openrouter.env")
+  | .bedrock _, _               => (["AWS_BEARER_TOKEN_BEDROCK", "BEDROCK_API_KEY"], some "bedrock.env")
+  | .azure _, _                 => (["AZURE_OPENAI_API_KEY", "OPENAI_API_KEY"], some "azure.env")
+  | .vertex _, _                => (["VERTEX_API_KEY", "GOOGLE_ACCESS_TOKEN"], none)
+  | .copilot, _                 => (["GITHUB_COPILOT_TOKEN"], none)
+  | .antigravity, _             => (["ANTIGRAVITY_API_KEY"], none)
+  | .grokBuild, _               => (["GROK_DEPLOYMENT_KEY", "XAI_API_KEY"], some "xai.env")
+  | .kimiCode, _                => (["KIMI_API_KEY", "MOONSHOT_API_KEY"], some "kimi.env")
+  | .zaiCoding, _               => (["ZHIPU_API_KEY", "ZAI_API_KEY"], some "zai.env")
+  | .alibabaCoding, _           => (["BAILIAN_CODING_PLAN_API_KEY", "DASHSCOPE_API_KEY"], some "alibaba-coding-plan.env")
+  | .opencodeZen, _             => (["OPENCODE_API_KEY"], some "opencode.env")
+  | .opencodeGo, _              => (["OPENCODE_GO_API_KEY", "OPENCODE_API_KEY"], some "opencode-go.env")
+  | .groq, _                    => (["GROQ_API_KEY"], some "groq.env")
+  | .cerebras, _                => (["CEREBRAS_API_KEY"], some "cerebras.env")
+  | .together, _                => (["TOGETHER_API_KEY"], some "togetherai.env")
+  | .fireworks, _               => (["FIREWORKS_API_KEY"], some "fireworks.env")
+  | .deepinfra, _               => (["DEEPINFRA_API_KEY"], some "deepinfra.env")
+  | .novita, _                  => (["NOVITA_API_KEY"], some "novita.env")
+  | .baseten, _                 => (["BASETEN_API_KEY"], some "baseten.env")
+  | .nebius, _                  => (["NEBIUS_API_KEY"], some "nebius.env")
+  | .nvidiaNim, _               => (["NVIDIA_API_KEY"], some "nvidia-nim.env")
+  | .ollama, _                  => (["OLLAMA_API_KEY"], some "ollama.env")
+  | .lmstudio, _                => (["LMSTUDIO_API_KEY"], some "lmstudio.env")
+  | .custom _, _                => (["LLM_API_KEY", "OPENAI_API_KEY"], some "openai-compatible.env")
+
 /-- Default environment variable names for API keys per `(Provider, Model)`. -/
 def apiKeyEnvVars (provider : Provider) (model : Model) : List String :=
-  match provider, model with
-  | .direct,       .claude _ => ["ANTHROPIC_API_KEY"]
-  | .direct,       .openai _ => ["OPENAI_API_KEY"]
-  | .direct,       .gemini _ => ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
-  | .openRouter _, _         => ["OPENROUTER_API_KEY"]
-  | .bedrock _,    _         => ["AWS_BEARER_TOKEN_BEDROCK", "BEDROCK_API_KEY"]
-  | .azure _,      _         => ["AZURE_OPENAI_API_KEY", "OPENAI_API_KEY"]
-  | .vertex _,     _         => ["VERTEX_API_KEY", "GOOGLE_ACCESS_TOKEN"]
-  | .copilot,      _         => ["GITHUB_COPILOT_TOKEN"]
-  | .antigravity,  _         => ["ANTIGRAVITY_API_KEY"]
-  | .grokBuild,    _         => ["GROK_DEPLOYMENT_KEY", "XAI_API_KEY"]
-  | .custom _,     _         => ["LLM_API_KEY", "OPENAI_API_KEY"]
+  (apiKeyEnvVarsAndFile provider model).1
 
-/-- Resolve the API key from `cfg.apiKey` or the environment. -/
-def resolveApiKey (cfg : ModelConfig) : ExceptT LLMError IO String := do
+/-- Try to find a configured API key in `cfg.apiKey`, process environment variables,
+    saved `.env` files (`~/.config/jcode/*.env`), or external agent stores (`opencode`, `pi`, `hermes`). -/
+def findConfiguredApiKey? (cfg : ModelConfig) : IO (Option String) := do
   if let some key := cfg.apiKey then
-    if !key.isEmpty then return key
-  let envVars := apiKeyEnvVars cfg.provider cfg.model
+    if !key.isEmpty then return some key
+  let (envVars, envFile?) := apiKeyEnvVarsAndFile cfg.provider cfg.model
   for var in envVars do
-    if let some val ← liftM (IO.getEnv var) then
-      if !val.isEmpty then return val
+    if let some val ← IO.getEnv var then
+      if !val.trimAscii.toString.isEmpty then
+        return some val.trimAscii.toString
+  if let some envFile := envFile? then
+    for var in envVars do
+      if let some val ← Auth.Other.loadFromJcodeEnvFile? var envFile then
+        return some val
+  for var in envVars do
+    if let some val ← Auth.Other.loadFromExternalAgentStores? var then
+      return some val
+  return none
+
+/-- Resolve the API key from `cfg.apiKey`, environment, or local credential stores. -/
+def resolveApiKey (cfg : ModelConfig) : ExceptT LLMError IO String := do
+  if let some key ← liftM (findConfiguredApiKey? cfg) then
+    return key
   match cfg.provider with
-  | .custom _ => return ""
+  | .custom _ | .ollama | .lmstudio => return ""
   | _ =>
-    let varsStr := String.intercalate " or " envVars
+    let varsStr := String.intercalate " or " (apiKeyEnvVars cfg.provider cfg.model)
     throw (.auth .missingApiKey s!"Missing API key: set ModelConfig.apiKey or environment variable {varsStr}")
 
 /-- Resolve the concrete `ResolvedAuth` for a `ModelConfig` (API key, subscription OAuth, or bearer token). -/
@@ -70,18 +113,17 @@ def resolveAuth (cfg : ModelConfig) (session : Option Session := none) :
       | .direct, .gemini _ =>
         let (creds, proj) ← Auth.Other.loadAndEnsureFreshGemini session
         return .geminiOAuth creds proj
+      | .direct, .grok _ =>
+        let creds ← Auth.Other.loadAndEnsureFreshGrok session
+        return .grokOAuth creds
       | _, _ =>
         throw (.invalidRequest
-          (.unsupportedFeature s!"Subscription OAuth is not supported for provider {repr cfg.provider}")
+          (.unsupportedFeature s!"Subscription OAuth is not supported for provider {repr cfg.provider} model {cfg.model}")
           "Unsupported OAuth provider")
     | .auto =>
-      if let some key := cfg.apiKey then
-        if !key.isEmpty then return .apiKey key
-      let envVars := apiKeyEnvVars cfg.provider cfg.model
-      for var in envVars do
-        if let some val ← liftM (IO.getEnv var) then
-          if !val.isEmpty then return .apiKey val
-      -- If no API key is set in config or env, automatically try local subscription OAuth for `.direct`
+      if let some key ← liftM (findConfiguredApiKey? cfg) then
+        return .apiKey key
+      -- If no API key is configured, automatically try local subscription OAuth for `.direct`
       match cfg.provider, cfg.model with
       | .direct, .openai _ =>
         let creds ← Auth.OpenAI.loadAndEnsureFresh none session
@@ -92,6 +134,9 @@ def resolveAuth (cfg : ModelConfig) (session : Option Session := none) :
       | .direct, .gemini _ =>
         let (creds, proj) ← Auth.Other.loadAndEnsureFreshGemini session
         return .geminiOAuth creds proj
+      | .direct, .grok _ =>
+        let creds ← Auth.Other.loadAndEnsureFreshGrok session
+        return .grokOAuth creds
       | _, _ =>
         return .apiKey (← resolveApiKey cfg)
 
@@ -175,6 +220,13 @@ private def parseTarget (url : String) : Except LLMError Target := do
     | throw (.invalidRequest (.malformedParameters s!"Invalid endpoint URL: {url}") "Invalid endpoint URL")
   return .absolute uri
 
+private def appendOpenAISuffix (base : String) (api : WireApi) : String :=
+  let trimmed := if base.endsWith "/" then (base.dropEnd 1).toString else base
+  match api with
+  | .anthropicMessages => s!"{trimmed}/v1/messages"
+  | .openaiResponses   => s!"{trimmed}/responses"
+  | _                  => s!"{trimmed}/chat/completions"
+
 /-- Construct the full endpoint URL for a `ModelConfig`. -/
 def resolveEndpointUrl (cfg : ModelConfig) : String :=
   let api := cfg.effectiveWireApi
@@ -192,14 +244,21 @@ def resolveEndpointUrl (cfg : ModelConfig) : String :=
   else
     match cfg.provider with
     | .direct =>
-      match api with
-      | .anthropicMessages => "https://api.anthropic.com/v1/messages"
-      | .openaiChat        => "https://api.openai.com/v1/chat/completions"
-      | .openaiResponses   => "https://api.openai.com/v1/responses"
-      | .geminiGenerate    => s!"https://generativelanguage.googleapis.com/v1beta/models/{modelId}:generateContent"
-      | .bedrockConverse   => s!"https://bedrock-runtime.us-east-1.amazonaws.com/model/{modelId}/converse"
-      | .bedrockInvoke     => s!"https://bedrock-runtime.us-east-1.amazonaws.com/model/{modelId}/invoke"
-      | .auto              => "https://api.openai.com/v1/chat/completions"
+      match cfg.model, api with
+      | _,                  .anthropicMessages => "https://api.anthropic.com/v1/messages"
+      | _,                  .geminiGenerate    => s!"https://generativelanguage.googleapis.com/v1beta/models/{modelId}:generateContent"
+      | _,                  .bedrockConverse   => s!"https://bedrock-runtime.us-east-1.amazonaws.com/model/{modelId}/converse"
+      | _,                  .bedrockInvoke     => s!"https://bedrock-runtime.us-east-1.amazonaws.com/model/{modelId}/invoke"
+      | .deepseek _,        _                  => appendOpenAISuffix "https://api.deepseek.com" api
+      | .kimi .forCoding,   _                  => appendOpenAISuffix "https://api.kimi.com/coding/v1" api
+      | .kimi _,            _                  => appendOpenAISuffix "https://api.moonshot.ai/v1" api
+      | .glm _,             _                  => appendOpenAISuffix "https://api.z.ai/api/coding/paas/v4" api
+      | .qwen _,            _                  => appendOpenAISuffix "https://coding-intl.dashscope.aliyuncs.com/v1" api
+      | .minimax _,         _                  => appendOpenAISuffix "https://api.minimax.io/v1" api
+      | .grok _,            _                  => appendOpenAISuffix "https://api.x.ai/v1" api
+      | .mistral _,         _                  => appendOpenAISuffix "https://api.mistral.ai/v1" api
+      | _,                  .openaiResponses   => "https://api.openai.com/v1/responses"
+      | _,                  _                  => "https://api.openai.com/v1/chat/completions"
     | .openRouter _ =>
       match api with
       | .openaiResponses   => "https://openrouter.ai/api/v1/responses"
@@ -221,23 +280,32 @@ def resolveEndpointUrl (cfg : ModelConfig) : String :=
       match cfg.model with
       | .claude _ => s!"{host}/publishers/anthropic/models/{modelId}:rawPredict"
       | .gemini _ => s!"{host}/publishers/google/models/{modelId}:generateContent"
-      | .openai _ => s!"{host}/endpoints/openapi/chat/completions"
+      | _         => s!"{host}/endpoints/openapi/chat/completions"
     | .copilot =>
       match api with
       | .openaiResponses => "https://api.githubcopilot.com/responses"
       | _                => "https://api.githubcopilot.com/chat/completions"
-    | .antigravity =>
-      s!"{Auth.Other.antigravityEndpoint}:generateContent"
-    | .grokBuild =>
-      "https://cli-chat-proxy.grok.com/v1/chat/completions"
-    | .custom base =>
-      let trimmed := if base.endsWith "/" then (base.dropEnd 1).toString else base
-      match api with
-      | .anthropicMessages => s!"{trimmed}/v1/messages"
-      | .openaiResponses   => s!"{trimmed}/v1/responses"
-      | _                  => s!"{trimmed}/chat/completions"
+    | .antigravity   => s!"{Auth.Other.antigravityEndpoint}:generateContent"
+    | .grokBuild     => appendOpenAISuffix "https://cli-chat-proxy.grok.com/v1" api
+    | .kimiCode      => appendOpenAISuffix "https://api.kimi.com/coding/v1" api
+    | .zaiCoding     => appendOpenAISuffix "https://api.z.ai/api/coding/paas/v4" api
+    | .alibabaCoding => appendOpenAISuffix "https://coding-intl.dashscope.aliyuncs.com/v1" api
+    | .opencodeZen   => appendOpenAISuffix "https://opencode.ai/zen/v1" api
+    | .opencodeGo    => appendOpenAISuffix "https://opencode.ai/zen/go/v1" api
+    | .groq          => appendOpenAISuffix "https://api.groq.com/openai/v1" api
+    | .cerebras      => appendOpenAISuffix "https://api.cerebras.ai/v1" api
+    | .together      => appendOpenAISuffix "https://api.together.xyz/v1" api
+    | .fireworks     => appendOpenAISuffix "https://api.fireworks.ai/inference/v1" api
+    | .deepinfra     => appendOpenAISuffix "https://api.deepinfra.com/v1/openai" api
+    | .novita        => appendOpenAISuffix "https://api.novita.ai/openai" api
+    | .baseten       => appendOpenAISuffix "https://inference.baseten.co/v1" api
+    | .nebius        => appendOpenAISuffix "https://api.tokenfactory.nebius.com/v1" api
+    | .nvidiaNim     => appendOpenAISuffix "https://integrate.api.nvidia.com/v1" api
+    | .ollama        => appendOpenAISuffix "http://localhost:11434/v1" api
+    | .lmstudio      => appendOpenAISuffix "http://localhost:1234/v1" api
+    | .custom base   => appendOpenAISuffix base api
 
-/-- Construct the endpoint URL taking into account the resolved `ResolvedAuth`. -/
+/-- Construct the endpoint URL taking into account the resolved `ResolvedAuth` (including key-prefix routing for MiniMax & Kimi). -/
 def resolveEndpointUrlWithAuth (cfg : ModelConfig) (auth : ResolvedAuth) : String :=
   if cfg.baseUrl.isSome then
     resolveEndpointUrl cfg
@@ -249,16 +317,50 @@ def resolveEndpointUrlWithAuth (cfg : ModelConfig) (auth : ResolvedAuth) : Strin
     | .antigravityOAuth _ _ => s!"{Auth.Other.antigravityEndpoint}:generateContent"
     | .copilotBearer _      => resolveEndpointUrl { cfg with provider := .copilot }
     | .grokOAuth _          => "https://cli-chat-proxy.grok.com/v1/chat/completions"
-    | .apiKey _ | .bearer _ => resolveEndpointUrl cfg
+    | .apiKey key =>
+      match cfg.provider, cfg.model with
+      | .direct, .minimax _ =>
+        -- MiniMax China Coding Plan keys start with `sk-cp-` and route to `api.minimaxi.com`
+        if key.trimAscii.toString.startsWith "sk-cp-" then
+          appendOpenAISuffix "https://api.minimaxi.com/v1" cfg.effectiveWireApi
+        else
+          resolveEndpointUrl cfg
+      | .direct, .kimi _ =>
+        -- Kimi Code keys (`sk-kimi-...`) target `api.kimi.com/coding/v1`
+        if key.trimAscii.toString.startsWith "sk-kimi-" then
+          appendOpenAISuffix "https://api.kimi.com/coding/v1" cfg.effectiveWireApi
+        else
+          resolveEndpointUrl cfg
+      | _, _ => resolveEndpointUrl cfg
+    | .bearer _ => resolveEndpointUrl cfg
+
+/-- Whether a request requires Kimi / Coding Plan agent identification headers (`User-Agent: claude-cli/1.0.0`, `x-app: cli`). -/
+private def needsCodingAgentHeaders (cfg : ModelConfig) (url : String) : Bool :=
+  match cfg.provider, cfg.model with
+  | .kimiCode, _ | .zaiCoding, _ | .alibabaCoding, _ => true
+  | _, .kimi _ => true
+  | .direct, .glm _ | .direct, .qwen _ => true
+  | _, _ =>
+    url.contains "api.kimi.com/coding" ||
+    url.contains "dashscope.aliyuncs.com" ||
+    url.contains "api.z.ai/api/coding"
 
 /-- Build a `LeanHttp.Request` from a `ModelConfig`, resolved API key, and encoded JSON body. -/
 def buildHttpRequest (cfg : ModelConfig) (apiKey : String) (payload : Json) : Except LLMError Request := do
-  let url := resolveEndpointUrl cfg
+  let url := resolveEndpointUrlWithAuth cfg (.apiKey apiKey)
   let target ← parseTarget url
   let mut req := (Request.post target)
     |>.json payload
     |>.header headerName!"Accept" headerValue!"application/json"
     |>.withTimeouts { connect := .ofNat 15000, total := .ofNat 120000 }
+
+  if needsCodingAgentHeaders cfg url then
+    req := req
+      |>.header headerName!"User-Agent" headerValue!"claude-cli/1.0.0"
+      |>.header headerName!"x-app" headerValue!"cli"
+
+  if url.contains "opencode.ai" then
+    req := req.header headerName!"x-opencode-session" headerValue!"leanllm-session"
 
   match cfg.provider with
   | .direct =>
@@ -269,7 +371,8 @@ def buildHttpRequest (cfg : ModelConfig) (apiKey : String) (payload : Json) : Ex
     | .geminiGenerate =>
       req ← setHeaderOrThrow req headerName!"x-goog-api-key" apiKey
     | _ =>
-      req := req.bearer apiKey
+      if !apiKey.isEmpty then
+        req := req.bearer apiKey
   | .openRouter orCfg =>
     req := req.bearer apiKey
     if let some referer := orCfg.siteUrl then
@@ -281,11 +384,11 @@ def buildHttpRequest (cfg : ModelConfig) (apiKey : String) (payload : Json) : Ex
   | .azure azCfg =>
     req ← setHeaderOrThrow req headerName!"api-key" apiKey
     req := req.param "api-version" azCfg.apiVersion
-  | .vertex _ | .copilot | .antigravity | .grokBuild =>
-    req := req.bearer apiKey
-  | .custom _ =>
+  | .custom _ | .ollama | .lmstudio =>
     if !apiKey.isEmpty then
       req := req.bearer apiKey
+  | _ =>
+    req := req.bearer apiKey
 
   return req
 

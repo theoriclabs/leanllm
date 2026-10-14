@@ -6,8 +6,8 @@
 
 Most multi-provider LLM clients conflate the model family, the hosting service, the wire protocol, and the authentication mode (API key vs. subscription OAuth). In practice these four axes vary independently:
 
-1. `Leanllm.Model`: The model family and version, such as `.claude .sonnet55`, `.openai .gpt56Sol`, or `.gemini .flash35`.
-2. `Leanllm.Provider`: Where the model is hosted and how requests are routed (`.direct`, `.openRouter`, `.bedrock`, `.azure`, `.vertex`, `.copilot`, `.antigravity`, `.grokBuild`, or `.custom`).
+1. `Leanllm.Model`: The model family and version — `.claude`, `.openai`, `.gemini`, `.deepseek`, `.kimi`, `.glm`, `.qwen`, `.minimax`, `.grok`, or `.mistral`.
+2. `Leanllm.Provider`: Where the model is hosted and how requests are routed (`.direct`, `.openRouter`, `.bedrock`, `.azure`, `.vertex`, `.copilot`, `.antigravity`, `.grokBuild`, `.kimiCode`, `.zaiCoding`, `.alibabaCoding`, `.opencodeZen`, `.opencodeGo`, `.groq`, `.cerebras`, `.together`, `.fireworks`, `.deepinfra`, `.novita`, `.baseten`, `.nebius`, `.nvidiaNim`, `.ollama`, `.lmstudio`, or `.custom`).
 3. `Leanllm.WireApi`: Which JSON schema goes over HTTP and Server-Sent Events (`.anthropicMessages`, `.openaiChat`, `.openaiResponses`, `.geminiGenerate`, `.bedrockConverse`, `.bedrockInvoke`, or `.auto`).
 4. `Leanllm.AuthMode`: Whether to authenticate with a per-token API key or reuse a local subscription OAuth session (`.auto`, `.oauth account?`, `.apiKey key?`, or `.bearer token`).
 
@@ -39,6 +39,13 @@ Main
 | `Leanllm.Models.Claude` | `Leanllm/Models/Claude.lean` | 46 | `ClaudeModel` inductive type, native model IDs, and OpenRouter slugs |
 | `Leanllm.Models.OpenAI` | `Leanllm/Models/OpenAI.lean` | 40 | `OpenAIModel` inductive type, native model IDs, and OpenRouter slugs |
 | `Leanllm.Models.Gemini` | `Leanllm/Models/Gemini.lean` | 30 | `GeminiModel` inductive type, native model IDs, and OpenRouter slugs |
+| `Leanllm.Models.DeepSeek` | `Leanllm/Models/DeepSeek.lean` | 33 | `DeepSeekModel` inductive type (`v41Flash`, `v4Pro`, `v4Flash`, `v32`, `chat`, `reasoner`) |
+| `Leanllm.Models.Kimi` | `Leanllm/Models/Kimi.lean` | 34 | `KimiModel` inductive type (`k3`, `k27Code`, `k26`, `k25`, `k2Thinking`, `forCoding`) |
+| `Leanllm.Models.Glm` | `Leanllm/Models/Glm.lean` | 37 | `GlmModel` inductive type (`glm53Prime`, `glm53`, `glm53Flash`, `glm52`, `glm51`, `glm5`, `glm47`, `glm47Flash`) |
+| `Leanllm.Models.Qwen` | `Leanllm/Models/Qwen.lean` | 36 | `QwenModel` inductive type (`qwen38Max`, `qwen38Flash`, `qwen37Max`, `qwen37Plus`, `qwen35Plus`, `coderNext`, `coderPlus`) |
+| `Leanllm.Models.MiniMax` | `Leanllm/Models/MiniMax.lean` | 29 | `MiniMaxModel` inductive type (`m3`, `m27`, `m25`, `m2`) |
+| `Leanllm.Models.Grok` | `Leanllm/Models/Grok.lean` | 33 | `GrokModel` inductive type (`grok47`, `grok46`, `grok45`, `grok43`, `grokBuild01`, `codeFast1`) |
+| `Leanllm.Models.Mistral` | `Leanllm/Models/Mistral.lean` | 29 | `MistralModel` inductive type (`large4`, `medium35`, `small2603`, `devstral`) |
 | `Leanllm.Provider` | `Leanllm/Provider.lean` | 144 | `Model`, `WireApi`, `Provider`, provider configs, compatibility checks, and slug resolution |
 | `Leanllm.Message` | `Leanllm/Message.lean` | 71 | `Role`, `ContentPart`, `ImageSource`, `ToolSpec`, `ToolCall`, `ToolResult`, and `Message` constructors |
 | `Leanllm.Error` | `Leanllm/Error.lean` | 56 | `LLMError` sum type and structured sub-error kinds |

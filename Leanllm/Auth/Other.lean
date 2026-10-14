@@ -318,4 +318,94 @@ def loadAndEnsureFreshGrok (session : Option Session := none) : ExceptT LLMError
     }
   | _ => return creds
 
+/-! ## 4. Cross-Tool Credential Store Lookup (DeepSeek, Kimi, Z.AI, MiniMax, Qwen, etc.) -/
+
+private def parseDotEnvValue (content : String) (envKey : String) : Option String := do
+  let prefixStr := s!"{envKey}="
+  for rawLine in content.splitOn "\n" do
+    let line := rawLine.trimAscii.toString
+    if line.startsWith prefixStr then
+      let val := (line.drop prefixStr.length).toString.trimAscii.toString
+      let val :=
+        if (val.startsWith "\"" && val.endsWith "\"") || (val.startsWith "'" && val.endsWith "'") then
+          ((val.drop 1).dropEnd 1).toString
+        else
+          val
+      if !val.isEmpty then
+        return val
+  none
+
+/-- Read a saved API key from `~/.config/jcode/<envFile>` or `~/Library/Application Support/jcode/<envFile>`. -/
+def loadFromJcodeEnvFile? (envKey : String) (envFile : String) : IO (Option String) := do
+  for baseRel in [".config/jcode", "Library/Application Support/jcode", ".jcode"] do
+    if let some dir ← Auth.userHomePath baseRel then
+      let path := dir / envFile
+      if ← path.pathExists then
+        try
+          let content ← IO.FS.readFile path
+          if let some val := parseDotEnvValue content envKey then
+            return some val
+        catch _ => pure ()
+  return none
+
+/-- Provider keys used in OpenCode (`~/.local/share/opencode/auth.json`), Pi (`~/.pi/agent/auth.json`),
+    OpenClaw (`~/.openclaw/agent/auth.json`), and Hermes (`~/.hermes/auth.json`). -/
+def externalProviderKeysForEnv (envKey : String) : List String :=
+  match envKey with
+  | "DEEPSEEK_API_KEY"            => ["deepseek"]
+  | "KIMI_API_KEY"                => ["kimi-coding", "kimi", "moonshotai", "moonshot"]
+  | "MOONSHOT_API_KEY"            => ["moonshotai", "moonshot", "kimi"]
+  | "ZHIPU_API_KEY" | "ZAI_API_KEY" => ["zai", "zhipu"]
+  | "MINIMAX_API_KEY"             => ["minimax", "minimax-cn"]
+  | "BAILIAN_CODING_PLAN_API_KEY" | "DASHSCOPE_API_KEY" => ["alibaba-coding-plan", "bailian", "qwen"]
+  | "XAI_API_KEY"                 => ["xai"]
+  | "MISTRAL_API_KEY"             => ["mistral"]
+  | "GROQ_API_KEY"                => ["groq"]
+  | "CEREBRAS_API_KEY"            => ["cerebras"]
+  | "TOGETHER_API_KEY"            => ["togetherai", "together-ai", "together"]
+  | "FIREWORKS_API_KEY"           => ["fireworks"]
+  | "DEEPINFRA_API_KEY"           => ["deepinfra"]
+  | "NOVITA_API_KEY"              => ["novita", "novita-ai", "novita.ai"]
+  | "BASETEN_API_KEY"             => ["baseten"]
+  | "NEBIUS_API_KEY"              => ["nebius"]
+  | "NVIDIA_API_KEY"              => ["nvidia-nim", "nvidia"]
+  | "OPENCODE_API_KEY"            => ["opencode"]
+  | "OPENCODE_GO_API_KEY"         => ["opencode-go", "opencode"]
+  | "OPENROUTER_API_KEY"          => ["openrouter"]
+  | "ANTHROPIC_API_KEY"           => ["anthropic", "claude"]
+  | "OPENAI_API_KEY"              => ["openai", "openai-api"]
+  | "GEMINI_API_KEY" | "GOOGLE_API_KEY" => ["google", "gemini"]
+  | _                             => []
+
+private def extractExternalEntryKey (entry : Json) : Option String :=
+  (getStr? entry "key")
+    |>.or (getStr? entry "access_token")
+    |>.or (getStr? entry "access")
+
+/-- Probe OpenCode, Pi, OpenClaw, and Hermes auth stores for a matching provider credential. -/
+def loadFromExternalAgentStores? (envKey : String) : IO (Option String) := do
+  let providerKeys := externalProviderKeysForEnv envKey
+  if providerKeys.isEmpty then return none
+  for rel in [
+    ".local/share/opencode/auth.json",
+    ".pi/agent/auth.json",
+    ".openclaw/agent/auth.json",
+    ".hermes/auth.json"
+  ] do
+    if let some path ← Auth.userHomePath rel then
+      if let some root ← Auth.readJsonFile? path then
+        -- 1. Direct flat map `{ "<provider>": { "key": "..." } }`
+        for pk in providerKeys do
+          if let .ok entry := root.getObjVal? pk then
+            if let some k := extractExternalEntryKey entry then
+              return some k
+        -- 2. Hermes `credential_pool.<provider>[0]`
+        if let .ok pool := root.getObjVal? "credential_pool" then
+          for pk in providerKeys do
+            if let .ok (arr : Array Json) := pool.getObjValAs? (Array Json) pk then
+              if let some first := arr[0]? then
+                if let some k := extractExternalEntryKey first then
+                  return some k
+  return none
+
 end Leanllm.Auth.Other

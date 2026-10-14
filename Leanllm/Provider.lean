@@ -1,22 +1,55 @@
 import Leanllm.Models.Claude
 import Leanllm.Models.OpenAI
 import Leanllm.Models.Gemini
+import Leanllm.Models.DeepSeek
+import Leanllm.Models.Kimi
+import Leanllm.Models.Glm
+import Leanllm.Models.Qwen
+import Leanllm.Models.MiniMax
+import Leanllm.Models.Grok
+import Leanllm.Models.Mistral
 
 namespace Leanllm
 
 /-- Top-level sum over model families. -/
 inductive Model where
-  | claude (m : ClaudeModel)
-  | openai (m : OpenAIModel)
-  | gemini (m : GeminiModel)
+  | claude   (m : ClaudeModel)
+  | openai   (m : OpenAIModel)
+  | gemini   (m : GeminiModel)
+  | deepseek (m : DeepSeekModel)
+  | kimi     (m : KimiModel)
+  | glm      (m : GlmModel)
+  | qwen     (m : QwenModel)
+  | minimax  (m : MiniMaxModel)
+  | grok     (m : GrokModel)
+  | mistral  (m : MistralModel)
   deriving Repr, BEq, Inhabited
 
 namespace Model
 
 def toModelId : Model → String
-  | .claude m => m.toModelId
-  | .openai m => m.toModelId
-  | .gemini m => m.toModelId
+  | .claude m   => m.toModelId
+  | .openai m   => m.toModelId
+  | .gemini m   => m.toModelId
+  | .deepseek m => m.toModelId
+  | .kimi m     => m.toModelId
+  | .glm m      => m.toModelId
+  | .qwen m     => m.toModelId
+  | .minimax m  => m.toModelId
+  | .grok m     => m.toModelId
+  | .mistral m  => m.toModelId
+
+def toOpenRouterSlug : Model → String
+  | .claude m   => m.toOpenRouterSlug
+  | .openai m   => m.toOpenRouterSlug
+  | .gemini m   => m.toOpenRouterSlug
+  | .deepseek m => m.toOpenRouterSlug
+  | .kimi m     => m.toOpenRouterSlug
+  | .glm m      => m.toOpenRouterSlug
+  | .qwen m     => m.toOpenRouterSlug
+  | .minimax m  => m.toOpenRouterSlug
+  | .grok m     => m.toOpenRouterSlug
+  | .mistral m  => m.toOpenRouterSlug
 
 instance : ToString Model where
   toString := toModelId
@@ -73,14 +106,30 @@ structure VertexConfig where
 /-- Where the model is hosted and how requests are authenticated/routed. -/
 inductive Provider where
   | direct
-  | openRouter  (cfg : OpenRouterConfig := {})
-  | bedrock     (cfg : BedrockConfig    := {})
-  | azure       (cfg : AzureConfig)
-  | vertex      (cfg : VertexConfig)
+  | openRouter    (cfg : OpenRouterConfig := {})
+  | bedrock       (cfg : BedrockConfig    := {})
+  | azure         (cfg : AzureConfig)
+  | vertex        (cfg : VertexConfig)
   | copilot                                -- GitHub Copilot subscription (api.githubcopilot.com)
   | antigravity                            -- Google Antigravity subscription (daily-cloudcode-pa.googleapis.com)
   | grokBuild                              -- xAI Grok CLI subscription (cli-chat-proxy.grok.com)
-  | custom      (baseUrl : String)
+  | kimiCode                               -- Kimi Code subscription / coding agent endpoint (api.kimi.com/coding/v1)
+  | zaiCoding                              -- Z.AI Coding Plan (api.z.ai/api/coding/paas/v4)
+  | alibabaCoding                          -- Alibaba Cloud Bailian Coding Plan (coding-intl.dashscope.aliyuncs.com/v1)
+  | opencodeZen                            -- OpenCode Zen (opencode.ai/zen/v1)
+  | opencodeGo                             -- OpenCode Go (opencode.ai/zen/go/v1)
+  | groq                                   -- Groq Cloud (api.groq.com/openai/v1)
+  | cerebras                               -- Cerebras Inference (api.cerebras.ai/v1)
+  | together                               -- Together AI (api.together.xyz/v1)
+  | fireworks                              -- Fireworks AI (api.fireworks.ai/inference/v1)
+  | deepinfra                              -- DeepInfra (api.deepinfra.com/v1/openai)
+  | novita                                 -- Novita AI (api.novita.ai/openai)
+  | baseten                                -- Baseten (inference.baseten.co/v1)
+  | nebius                                 -- Nebius Token Factory (api.tokenfactory.nebius.com/v1)
+  | nvidiaNim                              -- NVIDIA NIM (integrate.api.nvidia.com/v1)
+  | ollama                                 -- Local Ollama (http://localhost:11434/v1)
+  | lmstudio                               -- Local LM Studio (http://localhost:1234/v1)
+  | custom        (baseUrl : String)
   deriving Repr, BEq, Inhabited
 
 namespace Provider
@@ -89,43 +138,43 @@ namespace Provider
 def defaultWireApi (provider : Provider) (model : Model) : WireApi :=
   match provider, model with
   | .direct,        .claude _ => .anthropicMessages
-  | .direct,        .openai _ => .openaiChat
   | .direct,        .gemini _ => .geminiGenerate
+  | .direct,        _         => .openaiChat
   | .openRouter _,  _         => .openaiChat
   | .bedrock _,     _         => .bedrockConverse
   | .azure _,       _         => .openaiChat
   | .vertex _,      .claude _ => .anthropicMessages
   | .vertex _,      .gemini _ => .geminiGenerate
-  | .vertex _,      .openai _ => .openaiChat
-  | .copilot,       _         => .openaiChat
+  | .vertex _,      _         => .openaiChat
   | .antigravity,   _         => .geminiGenerate
-  | .grokBuild,     _         => .openaiChat
-  | .custom _,      _         => .openaiChat
+  | _,              _         => .openaiChat
 
 /-- Whether a `Provider` supports hosting a given `Model` family. -/
 def supportsModel : Provider → Model → Bool
-  | .direct,       _         => true
-  | .openRouter _, _         => true
-  | .bedrock _,    .claude _ => true
-  | .bedrock _,    _         => false
-  | .azure _,      .openai _ => true
-  | .azure _,      _         => false
-  | .vertex _,     .gemini _ => true
-  | .vertex _,     .claude _ => true
-  | .vertex _,     .openai _ => false
-  | .copilot,      _         => true
-  | .antigravity,  .gemini _ => true
-  | .antigravity,  _         => false
-  | .grokBuild,    _         => true
-  | .custom _,     _         => true
+  | .direct,        _         => true
+  | .openRouter _,  _         => true
+  | .bedrock _,     .claude _ => true
+  | .bedrock _,     _         => false
+  | .azure _,       .openai _ => true
+  | .azure _,       _         => false
+  | .vertex _,      .gemini _ => true
+  | .vertex _,      .claude _ => true
+  | .vertex _,      _         => false
+  | .antigravity,   .gemini _ => true
+  | .antigravity,   _         => false
+  | .kimiCode,      .kimi _   => true
+  | .kimiCode,      _         => false
+  | .zaiCoding,     .glm _    => true
+  | .zaiCoding,     _         => false
+  | .alibabaCoding, .qwen _   => true
+  | .alibabaCoding, _         => false
+  | _,              _         => true
 
 /-- Resolve the provider-specific model identifier string. -/
 def resolveModelId (provider : Provider) (model : Model) : String :=
   match provider, model with
   | .direct, m => m.toModelId
-  | .openRouter _, .claude m => m.toOpenRouterSlug
-  | .openRouter _, .openai m => m.toOpenRouterSlug
-  | .openRouter _, .gemini m => m.toOpenRouterSlug
+  | .openRouter _, m => m.toOpenRouterSlug
   | .bedrock cfg, .claude m =>
     let prefixStr := if cfg.crossRegion then "us." else ""
     s!"{prefixStr}anthropic.{m.toModelId}-v1:0"
@@ -133,12 +182,13 @@ def resolveModelId (provider : Provider) (model : Model) : String :=
   | .azure cfg, m => cfg.deployment.getD m.toModelId
   | .vertex _, m => m.toModelId
   | .copilot, .claude m =>
-    -- Copilot uses dot-separated version numbers for Claude models (e.g. claude-sonnet-4.5)
     (m.toOpenRouterSlug.splitOn "/").getLastD m.toModelId
   | .copilot, m => m.toModelId
-  | .antigravity, m => m.toModelId
-  | .grokBuild, m => m.toModelId
-  | .custom _, m => m.toModelId
+  | .together, m | .deepinfra, m | .novita, m | .baseten, m | .nebius, m | .nvidiaNim, m =>
+    match m with
+    | .deepseek _ | .kimi _ | .glm _ | .qwen _ => m.toOpenRouterSlug
+    | _ => m.toModelId
+  | _, m => m.toModelId
 
 end Provider
 end Leanllm

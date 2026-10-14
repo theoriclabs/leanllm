@@ -1,3 +1,13 @@
+import Leanllm.Models.Claude
+import Leanllm.Models.OpenAI
+import Leanllm.Models.Gemini
+import Leanllm.Models.DeepSeek
+import Leanllm.Models.Kimi
+import Leanllm.Models.Glm
+import Leanllm.Models.Qwen
+import Leanllm.Models.MiniMax
+import Leanllm.Models.Grok
+import Leanllm.Models.Mistral
 import Leanllm.Provider
 import Leanllm.Models
 import Leanllm.Message
