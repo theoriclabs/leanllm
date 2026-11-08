@@ -152,7 +152,16 @@ def checkWeather : IO Unit := do
     IO.eprintln s!"Error: {repr err}"
 ```
 
-### 6. Get typed JSON back
+### 6. Token usage and cost
+
+Every `LLMResponse` carries `usage : Option Usage` and `cost : Option Cost`. `Usage` has one meaning on every wire API: `inputTokens` and `outputTokens` are totals, and `cacheReadTokens`, `cacheWriteTokens`, `cacheWriteLongTtlTokens` and `reasoningTokens` are subsets of them. `cost` is integer nano-USD from the versioned price table in `Leanllm/Pricing.lean`, with a `basis` of `.apiKey` (billed) or `.subscription` (list-price equivalent covered by a plan). It is `none` when the response has no usage or the model has no confirmed rate; leanllm never estimates a cost.
+
+```lean
+if let some c := resp.cost then
+  IO.println s!"cost: {c.nanoUsd} nano-USD ({repr c.basis}, prices {c.rateVersion})"
+```
+
+### 7. Get typed JSON back
 
 `completionAs` asks for JSON that follows a schema and decodes it with `FromJson`. It uses the provider's native structured output where one is documented (OpenAI `response_format` / Responses `text.format`, Anthropic `output_config.format`, Gemini `responseJsonSchema`, Bedrock `outputConfig`). Elsewhere it puts the schema in the prompt and decodes the first JSON object in the reply. The per-provider strategy and doc links are in `Leanllm/ResponseFormat.lean`.
 
@@ -227,7 +236,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the module dependency graph
 
 ```bash
 lake build
-lake test   # offline unit tests (LeanllmTests.lean): no network, no API keys
+lake test   # offline unit tests (usage decoding, cost, structured output); no network or API keys
 ```
 
 `Main.lean` runs 8 end-to-end integration checks across direct Anthropic, direct Gemini, and OpenRouter (synchronous completions, tool calls, the OpenAI Responses wire API, and SSE streaming):

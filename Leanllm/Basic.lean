@@ -7,6 +7,7 @@ import Leanllm.Response
 import Leanllm.Auth
 import Leanllm.Codec
 import Leanllm.Transport
+import Leanllm.Pricing
 
 namespace Leanllm
 
@@ -66,12 +67,7 @@ private def callOpenAIOAuthSse (cfg : ModelConfig) (req : LeanHttp.Request)
       if !decoded.message.content.isEmpty then
         return decoded
     let id := (respObj.getObjValAs? String "id").toOption.getD ""
-    let usage : Option Usage := do
-      let u ← (respObj.getObjVal? "usage").toOption
-      let inputTokens ← (u.getObjValAs? Nat "input_tokens").toOption
-      let outputTokens ← (u.getObjValAs? Nat "output_tokens").toOption
-      let cacheRead := ((u.getObjVal? "input_tokens_details").toOption >>= fun d => (d.getObjValAs? Nat "cached_tokens").toOption)
-      pure { inputTokens, outputTokens, cacheReadTokens := cacheRead }
+    let usage := Codec.decodeOpenAIResponsesUsage respObj
     let textParts : List ContentPart := if streamedText.isEmpty then [] else [.text streamedText]
     return {
       id
@@ -106,11 +102,12 @@ def callWithSession (cfg : ModelConfig) (messages : List Message)
     | .error err => throw err
   match auth with
   | .openaiOAuth _ =>
-    callOpenAIOAuthSse cfg req session
+    let resp ← callOpenAIOAuthSse cfg req session
+    return resp.withCost cfg auth
   | _ =>
     let respJson ← Transport.sendJson req session
     match Codec.decodeResponseWithAuth cfg respJson (some auth) with
-    | .ok resp   => return resp
+    | .ok resp   => return resp.withCost cfg auth
     | .error err => throw err
 
 /-- Execute a single one-shot LLM call for a given `ModelConfig` and conversation history. -/
