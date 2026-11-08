@@ -725,8 +725,9 @@ def decodeBedrockConverse (cfg : ModelConfig) (j : Json) : Except LLMError LLMRe
 
 /-! ## Unified Wire Dispatch -/
 
-/-- Encode a `ModelConfig` and `List Message` into the wire JSON for `cfg` and optional `ResolvedAuth`. -/
-def encodeRequestWithAuth (cfg : ModelConfig) (messages : List Message)
+/-- Encode a `ModelConfig` and `List Message` into the wire JSON for `cfg` and optional `ResolvedAuth`,
+    ignoring `cfg.responseFormat`. -/
+private def encodeRequestWithAuthCore (cfg : ModelConfig) (messages : List Message)
     (auth : Option ResolvedAuth := none) : Except LLMError Json :=
   let api := match auth with
     | some a => cfg.effectiveWireApiForAuth a
@@ -745,6 +746,23 @@ def encodeRequestWithAuth (cfg : ModelConfig) (messages : List Message)
   | .bedrockConverse   => .ok (encodeBedrockConverse cfg messages)
   | .bedrockInvoke     => .ok (encodeAnthropicMessages cfg messages true false)
   | .auto              => .ok (encodeOpenAIChat cfg messages)
+
+/-- Encode a `ModelConfig` and `List Message` into the wire JSON for `cfg` and optional `ResolvedAuth`.
+    When `cfg.responseFormat` is set, the structured-output fields for the wire API are added. -/
+def encodeRequestWithAuth (cfg : ModelConfig) (messages : List Message)
+    (auth : Option ResolvedAuth := none) : Except LLMError Json := do
+  let base ← encodeRequestWithAuthCore cfg messages auth
+  match cfg.responseFormat with
+  | none    => return base
+  | some rf =>
+    let api := match auth with
+      | some a => cfg.effectiveWireApiForAuth a
+      | none   => cfg.effectiveWireApi
+    let isClaudeOAuth := match auth with | some (.claudeOAuth _) => true | _ => false
+    let codeAssist := match auth with
+      | some (.geminiOAuth _ _) | some (.antigravityOAuth _ _) => true
+      | _ => false
+    return rf.applyToPayload api cfg.provider cfg.model isClaudeOAuth codeAssist base
 
 /-- Encode a `ModelConfig` and `List Message` into the wire JSON for `cfg.effectiveWireApi`. -/
 def encodeRequest (cfg : ModelConfig) (messages : List Message) : Except LLMError Json :=
