@@ -13,6 +13,8 @@ import Leanllm.Models
 import Leanllm.Message
 import Leanllm.Error
 import Leanllm.Response
+import Leanllm.Cost
+import Leanllm.Pricing
 import Leanllm.Auth
 import Leanllm.Auth.OpenAI
 import Leanllm.Auth.Claude

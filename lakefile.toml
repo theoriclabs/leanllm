@@ -1,6 +1,7 @@
 name = "leanllm"
 version = "0.2.0"
 defaultTargets = ["leanllm"]
+testDriver = "«leanllm-tests»"
 
 [[require]]
 name = "leanhttp"
@@ -13,3 +14,7 @@ name = "Leanllm"
 [[lean_exe]]
 name = "leanllm"
 root = "Main"
+
+[[lean_exe]]
+name = "leanllm-tests"
+root = "LeanllmTests"
