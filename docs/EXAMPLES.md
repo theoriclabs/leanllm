@@ -376,3 +376,32 @@ def runServerBatch (prompts : List String) : IO Unit := do
     finally
       session.close
 ```
+
+## Record and replay (offline tests)
+
+`Recorder` stores each successful response under `<dir>/<requestHash>.json`; `Replayer` serves them back by hash with no network access. Both produce a `Caller` (`ModelConfig → List Message → IO (Except LLMError LLMResponse)`), so they plug into anything that takes an LLM-calling function.
+
+```lean
+import Leanllm
+
+open Leanllm
+
+-- Record once against the live provider (needs credentials).
+def recordSession : IO Unit := do
+  let caller := Recorder.live "test/fixtures/llm"
+  let cfg : ModelConfig := { model := .claude .haiku5_5, maxTokens := some 64 }
+  let _ ← caller cfg [Message.user "Name one prime number."]
+
+-- Replay in CI: no network, no API key.
+def replaySession : IO Unit := do
+  let caller := Replayer.caller "test/fixtures/llm"
+  let cfg : ModelConfig := { model := .claude .haiku5_5, maxTokens := some 64 }
+  match ← caller cfg [Message.user "Name one prime number."] with
+  | .ok resp => IO.println resp.text
+  | .error err =>
+    match isReplayMiss err with
+    | some hash => IO.eprintln s!"not recorded: {hash}"   -- a miss is never an empty reply
+    | none      => IO.eprintln s!"error: {repr err}"
+```
+
+The hash covers the provider, effective wire API, provider model id, endpoint host and the provider-encoded request body (messages, tools, parameters). It never includes headers, API keys, OAuth tokens or provider credentials, so recordings are shareable and replay works without credentials.

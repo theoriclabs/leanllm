@@ -20,3 +20,6 @@ import Leanllm.Auth.Other
 import Leanllm.Codec
 import Leanllm.Transport
 import Leanllm.Basic
+import Leanllm.Sha256
+import Leanllm.ResponseJson
+import Leanllm.Replay
