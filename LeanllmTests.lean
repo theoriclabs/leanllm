@@ -219,6 +219,20 @@ def testNoRate : TestM Unit := do
   let some r3 ← decodeAndCost { model := .openai .gpt4o, provider := .openRouter {} } chatJson | return
   checkEq "reseller gives no cost" r3.cost none
 
+/-- OpenAI-compatible vendors share the Chat Completions decoder; spot-check their tables. -/
+def testOtherVendors : TestM Unit := do
+  let some glm ← decodeAndCost { model := .glm .glm5_3, provider := .zaiCoding } chatJson | return
+  -- Z.AI coding plan: list-price equivalent, (1200-1024)*1400 + 1024*260 + 500*4400
+  checkEq "glm-5.3 coding plan cost" glm.cost (cost (176 * 1400 + 1024 * 260 + 500 * 4400) .subscription)
+  let some grok ← decodeAndCost { model := .grok .grok4_7 } chatJson | return
+  checkEq "grok-4.7 cost" grok.cost (cost (176 * 2000 + 1024 * 500 + 500 * 6000))
+  -- xAI: a prompt that reaches 200k tokens is billed at the higher tier.
+  let big := "{\"choices\": [{\"message\": {\"role\": \"assistant\", \"content\": \"x\"}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 200000, \"completion_tokens\": 1}}"
+  let some grokLong ← decodeAndCost { model := .grok .grok4_7 } big | return
+  checkEq "grok-4.7 long context cost" grokLong.cost (cost (200000 * 4000 + 12000))
+  let some ds ← decodeAndCost { model := .deepseek .v4Pro } chatJson | return
+  checkEq "deepseek time-of-day pricing gives no cost" ds.cost none
+
 def testBasis : TestM Unit := do
   checkEq "basis apiKey" (Pricing.costBasis .direct apiKeyAuth) .apiKey
   checkEq "basis bearer" (Pricing.costBasis .direct (.bearer "t")) .apiKey
@@ -239,6 +253,7 @@ def all : TestM Unit := do
   testBedrockConverse
   testMissingUsage
   testNoRate
+  testOtherVendors
   testBasis
 
 end LeanllmTests

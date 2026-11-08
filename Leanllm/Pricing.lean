@@ -154,18 +154,143 @@ def geminiRate : GeminiModel → Option ModelRate
   | .flash2_5 => some { toTokenRates := geminiRates 300 2500 30 }
   | .custom _ => none
 
+/-- Rates for a provider that charges no cache-write premium (writes billed as ordinary input). -/
+private def flatRates (input output cached : Nat) : TokenRates :=
+  { input, output, cacheRead := cached, cacheWrite := input }
+
+/-! ## DeepSeek
+
+Source: https://api-docs.deepseek.com/quick_start/pricing, read 2026-11-08. Since 2026-08-16
+DeepSeek bills peak and off-peak rates by time of day (off-peak is half), which a response's
+usage cannot tell apart, so no DeepSeek model has a rate. `deepseek-v3.2`, `deepseek-chat` and
+`deepseek-reasoner` are not listed at all. -/
+
+def deepseekRate : DeepSeekModel → Option ModelRate
+  | _ => none
+
+/-! ## Moonshot / Kimi
+
+Source: https://platform.moonshot.ai/docs/pricing/chat, read 2026-11-08. Columns: input /
+output / cached input / 5m cache write / 1h cache write, USD per MTok. "For K3 series models,
+cache writes are billed separately by TTL (5min / 1h)"; K2 models list no write price.
+Reasoning content counts as output tokens
+(https://platform.kimi.ai/docs/guide/use-thinking-models). `kimi-k2.5` and `kimi-k2-thinking` are
+deprecated and not listed; `kimi-for-coding` is a plan endpoint ID with no list price. -/
+
+def kimiRate : KimiModel → Option ModelRate
+  -- kimi-k3: $3.00 / $15.00 / $0.30 / $3.00 / $6.00
+  | .k3         => some { input := 3000, output := 15000, cacheRead := 300, cacheWrite := 3000, cacheWriteLongTtl := some 6000 }
+  -- kimi-k2.7-code: $0.95 / $4.00 / $0.19
+  | .k2_7Code   => some { toTokenRates := flatRates 950 4000 190 }
+  -- kimi-k2.6: $0.95 / $4.00 / $0.16
+  | .k2_6       => some { toTokenRates := flatRates 950 4000 160 }
+  | .k2_5       => none
+  | .k2Thinking => none
+  | .forCoding  => none
+  | .custom _   => none
+
+/-! ## Z.AI GLM
+
+Source: https://docs.z.ai/guides/overview/pricing ("All prices are in USD"), read 2026-11-08.
+Columns: input / cached input / cached input storage ("Limited-time Free") / output, USD per
+MTok. No cache-write charge. `glm-5.3-prime` is not listed. -/
+
+def glmRate : GlmModel → Option ModelRate
+  -- GLM-5.3: $1.4 / $0.26 / $4.4
+  | .glm5_3      => some { toTokenRates := flatRates 1400 4400 260 }
+  -- GLM-5.3-Flash: $0.15 / $0.03 / $0.50
+  | .glm5_3Flash => some { toTokenRates := flatRates 150 500 30 }
+  -- GLM-5.2: $1.4 / $0.26 / $4.4
+  | .glm5_2      => some { toTokenRates := flatRates 1400 4400 260 }
+  -- GLM-5.1: $1.4 / $0.26 / $4.4
+  | .glm5_1      => some { toTokenRates := flatRates 1400 4400 260 }
+  -- GLM-5: $1 / $0.2 / $3.2
+  | .glm5        => some { toTokenRates := flatRates 1000 3200 200 }
+  -- GLM-4.7: $0.6 / $0.11 / $2.2
+  | .glm4_7      => some { toTokenRates := flatRates 600 2200 110 }
+  -- GLM-4.7-Flash: "Free" in every column
+  | .glm4_7Flash => some { toTokenRates := flatRates 0 0 0 }
+  | .glm5_3Prime => none
+  | .custom _    => none
+
+/-! ## Qwen (Alibaba Cloud Model Studio)
+
+Source: https://www.alibabacloud.com/help/en/model-studio/model-pricing (last updated
+2026-11-07) and https://www.alibabacloud.com/help/en/model-studio/context-cache, read 2026-11-08.
+No Qwen model has a rate: cache-hit prices are published only as ratios that differ between
+implicit and explicit caching (which usage does not distinguish), and for `qwen3.8-*` not at all;
+`qwen3.7-plus` carries an undated limited-time discount; `qwen3-coder-next` and
+`qwen3-coder-plus` are not listed. -/
+
+def qwenRate : QwenModel → Option ModelRate
+  | _ => none
+
+/-! ## MiniMax
+
+Source: https://platform.minimax.io/docs/pricing/overview, read 2026-11-08. Standard tier,
+"Permanent 50% off" prices (the struck-through list prices are not charged). Columns: input /
+output / cache read, USD per MTok; tiers at "≤ 512k" / "> 512k input tokens" (512k read as
+512,000). No cache-write price is listed. MiniMax-M2.x models are retired and not listed. -/
+
+def minimaxRate : MiniMaxModel → Option ModelRate
+  -- MiniMax-M3: ≤512k $0.30 / $1.20 / $0.06; >512k $0.60 / $2.40 / $0.12
+  | .m3 => some { toTokenRates := flatRates 300 1200 60
+                  longContext := some (512000, flatRates 600 2400 120) }
+  | _   => none
+
+/-! ## xAI Grok
+
+Source: https://docs.x.ai/developers/pricing, read 2026-11-08. Columns: input / cached input /
+output, USD per MTok, with a higher tier for requests whose prompt reaches 200k tokens (so the
+threshold here is "more than 199,999"). Reasoning tokens are billed at the "Full completion token
+price" and there is no cache-write charge
+(https://docs.x.ai/developers/advanced-api-usage/prompt-caching/usage-and-pricing).
+`grok-code-fast-1` is listed as an alias of `grok-build-0.1` in the model data of
+https://docs.x.ai/docs/models. -/
+
+def grokRate : GrokModel → Option ModelRate
+  -- grok-4.7: <200k $2.00 / $0.50 / $6.00; ≥200k $4.00 / $1.00 / $12.00
+  | .grok4_7      => some { toTokenRates := flatRates 2000 6000 500
+                            longContext := some (199999, flatRates 4000 12000 1000) }
+  -- grok-4.6: <200k $2.00 / $0.50 / $6.00; ≥200k $4.00 / $1.00 / $12.00
+  | .grok4_6      => some { toTokenRates := flatRates 2000 6000 500
+                            longContext := some (199999, flatRates 4000 12000 1000) }
+  -- grok-4.5: <200k $2.00 / $0.30 / $6.00; ≥200k $4.00 / $0.60 / $12.00
+  | .grok4_5      => some { toTokenRates := flatRates 2000 6000 300
+                            longContext := some (199999, flatRates 4000 12000 600) }
+  -- grok-4.3: <200k $1.25 / $0.20 / $2.50; ≥200k $2.50 / $0.40 / $5.00
+  | .grok4_3      => some { toTokenRates := flatRates 1250 2500 200
+                            longContext := some (199999, flatRates 2500 5000 400) }
+  -- grok-build-0.1 (and its alias grok-code-fast-1): <200k $1.00 / $0.20 / $2.00; ≥200k $2.00 / $0.40 / $4.00
+  | .grokBuild0_1 | .codeFast1 =>
+                    some { toTokenRates := flatRates 1000 2000 200
+                           longContext := some (199999, flatRates 2000 4000 400) }
+  | .custom _     => none
+
+/-! ## Mistral
+
+Source: https://docs.mistral.ai/inference/pricing, read 2026-11-08. Only `mistral-large-4`
+(alias `mistral-large-4-0`) lists input, cached input and output. `mistral-small-2603` lists no
+cached-input price; `mistral-medium-3-5` and `devstral-2512` are deprecated and not on the
+pricing page. -/
+
+def mistralRate : MistralModel → Option ModelRate
+  -- Mistral Large 4: $0.7 / $0.07 / $2.1 (input / cached input / output)
+  | .large4 => some { toTokenRates := flatRates 700 2100 70 }
+  | _       => none
+
 /-- First-party list-price rate of a model, independent of where it is hosted. -/
 def listRate : Model → Option ModelRate
   | .claude m   => claudeRate m
   | .openai m   => openaiRate m
   | .gemini m   => geminiRate m
-  | .deepseek _ => none
-  | .kimi _     => none
-  | .glm _      => none
-  | .qwen _     => none
-  | .minimax _  => none
-  | .grok _     => none
-  | .mistral _  => none
+  | .deepseek m => deepseekRate m
+  | .kimi m     => kimiRate m
+  | .glm m      => glmRate m
+  | .qwen m     => qwenRate m
+  | .minimax m  => minimaxRate m
+  | .grok m     => grokRate m
+  | .mistral m  => mistralRate m
 
 /-- Rate for a model served by a provider.
 
