@@ -23,3 +23,6 @@ import Leanllm.Codec
 import Leanllm.Transport
 import Leanllm.Basic
 import Leanllm.Structured
+import Leanllm.Sha256
+import Leanllm.ResponseJson
+import Leanllm.Replay

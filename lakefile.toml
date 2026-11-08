@@ -1,6 +1,7 @@
 name = "leanllm"
 version = "0.2.0"
 defaultTargets = ["leanllm"]
+# `lake test` runs the offline test suite; «» is needed because the name contains a hyphen.
 testDriver = "«leanllm-tests»"
 
 [[require]]
@@ -17,7 +18,7 @@ root = "Main"
 
 [[lean_lib]]
 name = "LeanllmTests"
-roots = ["LeanllmTests.Baseline", "LeanllmTests.Golden", "LeanllmTests.Structured"]
+roots = ["LeanllmTests.Baseline", "LeanllmTests.Golden", "LeanllmTests.Structured", "LeanllmTests.Replay"]
 
 [[lean_exe]]
 name = "leanllm-tests"
