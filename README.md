@@ -161,6 +161,41 @@ if let some c := resp.cost then
   IO.println s!"cost: {c.nanoUsd} nano-USD ({repr c.basis}, prices {c.rateVersion})"
 ```
 
+### 7. Get typed JSON back
+
+`completionAs` asks for JSON that follows a schema and decodes it with `FromJson`. It uses the provider's native structured output where one is documented (OpenAI `response_format` / Responses `text.format`, Anthropic `output_config.format`, Gemini `responseJsonSchema`, Bedrock `outputConfig`). Elsewhere it puts the schema in the prompt and decodes the first JSON object in the reply. The per-provider strategy and doc links are in `Leanllm/ResponseFormat.lean`.
+
+```lean
+import Leanllm
+
+open Leanllm Lean
+
+structure Person where
+  name : String
+  age  : Nat
+  deriving FromJson
+
+def personSchema : Json := Json.mkObj [
+  ("type", "object"),
+  ("properties", Json.mkObj [
+    ("name", Json.mkObj [("type", "string")]),
+    ("age",  Json.mkObj [("type", "integer")])
+  ]),
+  ("required", toJson ["name", "age"]),
+  ("additionalProperties", toJson false)
+]
+
+def extract : IO Unit := do
+  let cfg : ModelConfig := { model := .openai .gpt5_4 }
+  let msgs := [Message.user "Ada Lovelace was 36. Extract the person."]
+  match ← (completionAs (β := Person) cfg msgs personSchema).run with
+  | .ok (p, _resp) => IO.println s!"{p.name} is {p.age}"
+  | .error (.schemaViolation _ raw err) => IO.eprintln s!"Bad reply ({err}): {raw}"
+  | .error (.llm err) => IO.eprintln s!"Error: {repr err}"
+```
+
+`strict := true` (the default) asks OpenAI-style providers for strict schema adherence, which needs `additionalProperties: false` and every property listed in `required`.
+
 ## Supported models and providers
 
 ### Models
@@ -201,7 +236,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the module dependency graph
 
 ```bash
 lake build
-lake test   # offline unit tests (usage decoding and cost); no network or API keys
+lake test   # offline unit tests (usage decoding, cost, structured output); no network or API keys
 ```
 
 `Main.lean` runs 8 end-to-end integration checks across direct Anthropic, direct Gemini, and OpenRouter (synchronous completions, tool calls, the OpenAI Responses wire API, and SSE streaming):

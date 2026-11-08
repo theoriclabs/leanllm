@@ -22,3 +22,4 @@ import Leanllm.Auth.Other
 import Leanllm.Codec
 import Leanllm.Transport
 import Leanllm.Basic
+import Leanllm.Structured

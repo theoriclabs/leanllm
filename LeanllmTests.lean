@@ -1,4 +1,5 @@
 import Leanllm
+import LeanllmTests.Structured
 
 /-!
 Offline tests for usage decoding and cost (theoriclabs/leanllm#1). No network, no API keys:
@@ -260,5 +261,8 @@ end LeanllmTests
 
 def main : IO UInt32 := do
   let ((), r) ← LeanllmTests.all.run {}
-  IO.println s!"leanllm-tests: {r.passed} passed, {r.failed.length} failed"
-  return if r.failed.isEmpty then 0 else 1
+  let (sPassed, sFailed) ← LeanllmTests.Structured.run
+  let passed := r.passed + sPassed
+  let failed := r.failed ++ sFailed
+  IO.println s!"leanllm-tests: {passed} passed, {failed.length} failed"
+  return if failed.isEmpty then 0 else 1
