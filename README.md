@@ -152,6 +152,15 @@ def checkWeather : IO Unit := do
     IO.eprintln s!"Error: {repr err}"
 ```
 
+### 6. Token usage and cost
+
+Every `LLMResponse` carries `usage : Option Usage` and `cost : Option Cost`. `Usage` has one meaning on every wire API: `inputTokens` and `outputTokens` are totals, and `cacheReadTokens`, `cacheWriteTokens`, `cacheWriteLongTtlTokens` and `reasoningTokens` are subsets of them. `cost` is integer nano-USD from the versioned price table in `Leanllm/Pricing.lean`, with a `basis` of `.apiKey` (billed) or `.subscription` (list-price equivalent covered by a plan). It is `none` when the response has no usage or the model has no confirmed rate; leanllm never estimates a cost.
+
+```lean
+if let some c := resp.cost then
+  IO.println s!"cost: {c.nanoUsd} nano-USD ({repr c.basis}, prices {c.rateVersion})"
+```
+
 ## Supported models and providers
 
 ### Models
@@ -192,6 +201,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the module dependency graph
 
 ```bash
 lake build
+lake test   # offline unit tests (usage decoding and cost); no network or API keys
 ```
 
 `Main.lean` runs 8 end-to-end integration checks across direct Anthropic, direct Gemini, and OpenRouter (synchronous completions, tool calls, the OpenAI Responses wire API, and SSE streaming):
