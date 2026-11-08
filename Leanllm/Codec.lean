@@ -148,6 +148,27 @@ private def decodeAnthropicPart (isClaudeOAuth : Bool) (j : Json) : Option Conte
     some (.toolCall { id, name, arguments := input })
   | _ => none
 
+/-- Decode Anthropic Messages `usage` into the normalized `Usage` (see `Usage` in `Response.lean`).
+    Anthropic's `input_tokens` excludes `cache_read_input_tokens` and `cache_creation_input_tokens`,
+    so they are added back; `cache_creation.ephemeral_1h_input_tokens` is the 1h-TTL write subset and
+    `output_tokens_details.thinking_tokens` the reasoning subset of the inclusive `output_tokens`.
+    Source: https://platform.claude.com/docs/en/api/messages (Usage object) and
+    https://platform.claude.com/docs/en/build-with-claude/prompt-caching, read 2026-11-08. -/
+def decodeAnthropicUsage (j : Json) : Option Usage := do
+  let u ← getObj? j "usage"
+  let input ← getNat? u "input_tokens"
+  let outputTokens ← getNat? u "output_tokens"
+  let cacheRead := getNat? u "cache_read_input_tokens"
+  let cacheWrite := getNat? u "cache_creation_input_tokens"
+  pure {
+    inputTokens      := input + cacheRead.getD 0 + cacheWrite.getD 0
+    outputTokens
+    cacheReadTokens  := cacheRead
+    cacheWriteTokens := cacheWrite
+    reasoningTokens  := (getObj? u "output_tokens_details") >>= (getNat? · "thinking_tokens")
+    cacheWriteLongTtlTokens := (getObj? u "cache_creation") >>= (getNat? · "ephemeral_1h_input_tokens")
+  }
+
 def decodeAnthropicMessages (cfg : ModelConfig) (j : Json) (isClaudeOAuth : Bool := false) : Except LLMError LLMResponse := do
   let some contentArr := getArr? j "content"
     | throw (.parse (.unexpectedSchema "Anthropic response with 'content' array" j) "Missing 'content' array")
@@ -161,16 +182,7 @@ def decodeAnthropicMessages (cfg : ModelConfig) (j : Json) (isClaudeOAuth : Bool
     | some "refusal"       => StopReason.contentFilter
     | some other           => StopReason.other other
     | none                 => StopReason.endTurn
-  let usage := do
-    let u ← getObj? j "usage"
-    let inputTokens ← getNat? u "input_tokens"
-    let outputTokens ← getNat? u "output_tokens"
-    pure {
-      inputTokens
-      outputTokens
-      cacheReadTokens  := getNat? u "cache_read_input_tokens"
-      cacheWriteTokens := getNat? u "cache_creation_input_tokens"
-    }
+  let usage := decodeAnthropicUsage j
   return {
     id
     model   := cfg.model
@@ -299,6 +311,24 @@ private def decodeOpenAIToolCall (j : Json) : Except LLMError ContentPart := do
     | .error _   => throw (.parse (.invalidToolArgs name rawArgs) s!"Invalid JSON arguments for tool '{name}'")
   return .toolCall { id, name, arguments := args }
 
+/-- Decode Chat Completions `usage`: `prompt_tokens` and `completion_tokens` are inclusive totals;
+    `prompt_tokens_details.cached_tokens` / `.cache_write_tokens` and
+    `completion_tokens_details.reasoning_tokens` are subsets of them.
+    Source: https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
+    (CompletionUsage), read 2026-11-08. -/
+def decodeOpenAIChatUsage (j : Json) : Option Usage := do
+  let u ← getObj? j "usage"
+  let inputTokens ← getNat? u "prompt_tokens"
+  let outputTokens ← getNat? u "completion_tokens"
+  let promptDetails := getObj? u "prompt_tokens_details"
+  pure {
+    inputTokens
+    outputTokens
+    cacheReadTokens  := promptDetails >>= (getNat? · "cached_tokens")
+    cacheWriteTokens := promptDetails >>= (getNat? · "cache_write_tokens")
+    reasoningTokens  := (getObj? u "completion_tokens_details") >>= (getNat? · "reasoning_tokens")
+  }
+
 def decodeOpenAIChat (cfg : ModelConfig) (j : Json) : Except LLMError LLMResponse := do
   if let some errObj := getObj? j "error" then
     let msg := (getStr? errObj "message").getD errObj.compress
@@ -331,18 +361,7 @@ def decodeOpenAIChat (cfg : ModelConfig) (j : Json) : Except LLMError LLMRespons
     | some other            => StopReason.other other
     | none                  => StopReason.endTurn
 
-  let usage := do
-    let u ← getObj? j "usage"
-    let inputTokens ← getNat? u "prompt_tokens"
-    let outputTokens ← getNat? u "completion_tokens"
-    let cacheRead := (getObj? u "prompt_tokens_details") >>= (getNat? · "cached_tokens")
-    let reasoning := (getObj? u "completion_tokens_details") >>= (getNat? · "reasoning_tokens")
-    pure {
-      inputTokens
-      outputTokens
-      cacheReadTokens := cacheRead
-      reasoningTokens := reasoning
-    }
+  let usage := decodeOpenAIChatUsage j
 
   return {
     id      := (getStr? j "id").getD ""
@@ -453,6 +472,27 @@ def decodeResponsesOutputItem (item : Json) : Except LLMError (List ContentPart 
   | _ => pure ()
   return (parts, hasToolCall)
 
+/-- Decode Responses API `usage` (from a response object): `input_tokens` / `output_tokens` are
+    inclusive totals; `input_tokens_details.cached_tokens` (billed reads) and `.cache_write_tokens`
+    are disjoint subsets of input, `.cache_write_tokens_details.ttl_12h_tokens` is the 12h-TTL write
+    subset, and `output_tokens_details.reasoning_tokens` is a subset of output.
+    Source: https://developers.openai.com/api/reference/resources/responses/methods/create (ResponseUsage)
+    and https://developers.openai.com/api/docs/guides/prompt-caching, read 2026-11-08. -/
+def decodeOpenAIResponsesUsage (j : Json) : Option Usage := do
+  let u ← getObj? j "usage"
+  let inputTokens ← getNat? u "input_tokens"
+  let outputTokens ← getNat? u "output_tokens"
+  let inputDetails := (getObj? u "input_tokens_details").or (getObj? u "prompt_tokens_details")
+  pure {
+    inputTokens
+    outputTokens
+    cacheReadTokens  := inputDetails >>= (getNat? · "cached_tokens")
+    cacheWriteTokens := inputDetails >>= (getNat? · "cache_write_tokens")
+    reasoningTokens  := (getObj? u "output_tokens_details") >>= (getNat? · "reasoning_tokens")
+    cacheWriteLongTtlTokens :=
+      inputDetails >>= (getObj? · "cache_write_tokens_details") >>= (getNat? · "ttl_12h_tokens")
+  }
+
 def decodeOpenAIResponses (cfg : ModelConfig) (j : Json) : Except LLMError LLMResponse := do
   let some outputArr := getArr? j "output"
     | throw (.parse (.unexpectedSchema "Responses payload with 'output' array" j) "Missing 'output' array")
@@ -471,13 +511,7 @@ def decodeOpenAIResponses (cfg : ModelConfig) (j : Json) : Except LLMError LLMRe
       | some other        => StopReason.other other
       | none              => StopReason.endTurn
 
-  let usage := do
-    let u ← getObj? j "usage"
-    let inputTokens ← getNat? u "input_tokens"
-    let outputTokens ← getNat? u "output_tokens"
-    let cacheRead := ((getObj? u "input_tokens_details") >>= (getNat? · "cached_tokens"))
-      |>.or ((getObj? u "prompt_tokens_details") >>= (getNat? · "cached_tokens"))
-    pure { inputTokens, outputTokens, cacheReadTokens := cacheRead }
+  let usage := decodeOpenAIResponsesUsage j
 
   return {
     id      := (getStr? j "id").getD ""
@@ -558,6 +592,24 @@ def encodeGeminiGenerate (cfg : ModelConfig) (messages : List Message)
     ]
   | none => baseReq
 
+/-- Decode Gemini `usageMetadata` (of the unwrapped response object). `promptTokenCount` already
+    includes `cachedContentTokenCount`; `totalTokenCount = prompt + toolUsePrompt + thoughts +
+    candidates`, so thoughts are not inside `candidatesTokenCount`. Normalized:
+    `inputTokens = promptTokenCount + toolUsePromptTokenCount`,
+    `outputTokens = candidatesTokenCount + thoughtsTokenCount` (output price includes thinking).
+    Source: https://ai.google.dev/api/generate-content (UsageMetadata) and
+    https://ai.google.dev/gemini-api/docs/pricing, read 2026-11-08. -/
+def decodeGeminiUsage (j : Json) : Option Usage := do
+  let u ← getObj? j "usageMetadata"
+  let prompt ← getNat? u "promptTokenCount"
+  let thoughts := getNat? u "thoughtsTokenCount"
+  pure {
+    inputTokens     := prompt + (getNat? u "toolUsePromptTokenCount").getD 0
+    outputTokens    := (getNat? u "candidatesTokenCount").getD 0 + thoughts.getD 0
+    cacheReadTokens := getNat? u "cachedContentTokenCount"
+    reasoningTokens := thoughts
+  }
+
 def decodeGeminiGenerate (cfg : ModelConfig) (rawJson : Json) : Except LLMError LLMResponse := do
   -- Unwrap Code Assist / Antigravity `{"response": ...}` envelope if present
   let j := (getObj? rawJson "response").getD rawJson
@@ -593,16 +645,7 @@ def decodeGeminiGenerate (cfg : ModelConfig) (rawJson : Json) : Except LLMError 
       | some other                => StopReason.other other
       | none                      => StopReason.endTurn
 
-  let usage := do
-    let u ← getObj? j "usageMetadata"
-    let inputTokens ← getNat? u "promptTokenCount"
-    let outputTokens := (getNat? u "candidatesTokenCount").getD 0
-    pure {
-      inputTokens
-      outputTokens
-      cacheReadTokens := getNat? u "cachedContentTokenCount"
-      reasoningTokens := getNat? u "thoughtsTokenCount"
-    }
+  let usage := decodeGeminiUsage j
 
   return {
     id      := (getStr? rawJson "traceId").or (getStr? j "responseId") |>.getD ""
@@ -672,6 +715,29 @@ def encodeBedrockConverse (cfg : ModelConfig) (messages : List Message) : Json :
       [("toolConfig", Json.mkObj [("tools", toJson specs)])]
   Json.mkObj ([("messages", toJson msgObjs)] ++ sysField ++ infField ++ toolField)
 
+/-- Decode Bedrock Converse `usage` (TokenUsage). With prompt caching, `inputTokens` excludes
+    cache reads and writes, so they are added back; `cacheDetails` entries with `ttl = "1h"` give
+    the 1h-TTL write subset.
+    Source: https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_TokenUsage.html,
+    .../API_runtime_CacheDetail.html and
+    https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html, read 2026-11-08. -/
+def decodeBedrockConverseUsage (j : Json) : Option Usage := do
+  let u ← getObj? j "usage"
+  let input ← getNat? u "inputTokens"
+  let outputTokens ← getNat? u "outputTokens"
+  let cacheRead := getNat? u "cacheReadInputTokens"
+  let cacheWrite := getNat? u "cacheWriteInputTokens"
+  let longWrite := (getArr? u "cacheDetails").map fun arr =>
+    arr.foldl (init := 0) fun acc d =>
+      if getStr? d "ttl" == some "1h" then acc + (getNat? d "inputTokens").getD 0 else acc
+  pure {
+    inputTokens      := input + cacheRead.getD 0 + cacheWrite.getD 0
+    outputTokens
+    cacheReadTokens  := cacheRead
+    cacheWriteTokens := cacheWrite
+    cacheWriteLongTtlTokens := longWrite
+  }
+
 def decodeBedrockConverse (cfg : ModelConfig) (j : Json) : Except LLMError LLMResponse := do
   let some outputObj := getObj? j "output"
     | throw (.parse (.unexpectedSchema "Bedrock Converse response with 'output'" j) "Missing 'output' object")
@@ -704,16 +770,7 @@ def decodeBedrockConverse (cfg : ModelConfig) (j : Json) : Except LLMError LLMRe
     | some other                  => StopReason.other other
     | none                        => StopReason.endTurn
 
-  let usage := do
-    let u ← getObj? j "usage"
-    let inputTokens ← getNat? u "inputTokens"
-    let outputTokens ← getNat? u "outputTokens"
-    pure {
-      inputTokens
-      outputTokens
-      cacheReadTokens  := getNat? u "cacheReadInputTokens"
-      cacheWriteTokens := getNat? u "cacheWriteInputTokens"
-    }
+  let usage := decodeBedrockConverseUsage j
 
   return {
     id      := ""
@@ -725,8 +782,9 @@ def decodeBedrockConverse (cfg : ModelConfig) (j : Json) : Except LLMError LLMRe
 
 /-! ## Unified Wire Dispatch -/
 
-/-- Encode a `ModelConfig` and `List Message` into the wire JSON for `cfg` and optional `ResolvedAuth`. -/
-def encodeRequestWithAuth (cfg : ModelConfig) (messages : List Message)
+/-- Encode a `ModelConfig` and `List Message` into the wire JSON for `cfg` and optional `ResolvedAuth`,
+    ignoring `cfg.responseFormat`. -/
+private def encodeRequestWithAuthCore (cfg : ModelConfig) (messages : List Message)
     (auth : Option ResolvedAuth := none) : Except LLMError Json :=
   let api := match auth with
     | some a => cfg.effectiveWireApiForAuth a
@@ -745,6 +803,23 @@ def encodeRequestWithAuth (cfg : ModelConfig) (messages : List Message)
   | .bedrockConverse   => .ok (encodeBedrockConverse cfg messages)
   | .bedrockInvoke     => .ok (encodeAnthropicMessages cfg messages true false)
   | .auto              => .ok (encodeOpenAIChat cfg messages)
+
+/-- Encode a `ModelConfig` and `List Message` into the wire JSON for `cfg` and optional `ResolvedAuth`.
+    When `cfg.responseFormat` is set, the structured-output fields for the wire API are added. -/
+def encodeRequestWithAuth (cfg : ModelConfig) (messages : List Message)
+    (auth : Option ResolvedAuth := none) : Except LLMError Json := do
+  let base ← encodeRequestWithAuthCore cfg messages auth
+  match cfg.responseFormat with
+  | none    => return base
+  | some rf =>
+    let api := match auth with
+      | some a => cfg.effectiveWireApiForAuth a
+      | none   => cfg.effectiveWireApi
+    let isClaudeOAuth := match auth with | some (.claudeOAuth _) => true | _ => false
+    let codeAssist := match auth with
+      | some (.geminiOAuth _ _) | some (.antigravityOAuth _ _) => true
+      | _ => false
+    return rf.applyToPayload api cfg.provider cfg.model isClaudeOAuth codeAssist base
 
 /-- Encode a `ModelConfig` and `List Message` into the wire JSON for `cfg.effectiveWireApi`. -/
 def encodeRequest (cfg : ModelConfig) (messages : List Message) : Except LLMError Json :=

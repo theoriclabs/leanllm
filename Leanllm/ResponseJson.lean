@@ -7,10 +7,10 @@ import Leanllm.Response
 # JSON codecs for `LLMResponse` and its parts
 
 A stable, provider-independent JSON form of `LLMResponse`, `Message`, `ContentPart`, `StopReason`,
-`Usage` and `Model`, used by `Leanllm.Replay` to store recorded responses on disk.
+`Usage`, `Cost` and `Model`, used by `Leanllm.Replay` to store recorded responses on disk.
 
-Decoders ignore unknown fields, so records written by a newer leanllm (for example with an extra
-`cost` field) still load.
+Decoders ignore unknown fields, so records written by a newer leanllm still load, and optional
+fields missing from older records (`cost`, `cacheWriteLongTtlTokens`) decode as `none`.
 -/
 
 namespace Leanllm
@@ -184,7 +184,8 @@ instance : ToJson Usage where
   toJson u := Json.mkObj ([("inputTokens", toJson u.inputTokens), ("outputTokens", toJson u.outputTokens)]
     ++ optKV "cacheReadTokens" u.cacheReadTokens
     ++ optKV "cacheWriteTokens" u.cacheWriteTokens
-    ++ optKV "reasoningTokens" u.reasoningTokens)
+    ++ optKV "reasoningTokens" u.reasoningTokens
+    ++ optKV "cacheWriteLongTtlTokens" u.cacheWriteLongTtlTokens)
 
 instance : FromJson Usage where
   fromJson? j := do
@@ -192,11 +193,34 @@ instance : FromJson Usage where
              outputTokens := ← j.getObjValAs? Nat "outputTokens"
              cacheReadTokens := ← optVal? j "cacheReadTokens"
              cacheWriteTokens := ← optVal? j "cacheWriteTokens"
-             reasoningTokens := ← optVal? j "reasoningTokens" }
+             reasoningTokens := ← optVal? j "reasoningTokens"
+             cacheWriteLongTtlTokens := ← optVal? j "cacheWriteLongTtlTokens" }
+
+instance : ToJson CostBasis where
+  toJson
+    | .apiKey       => "apiKey"
+    | .subscription => "subscription"
+
+instance : FromJson CostBasis where
+  fromJson? j := do
+    match ← j.getStr? with
+    | "apiKey"       => pure .apiKey
+    | "subscription" => pure .subscription
+    | other          => throw s!"unknown cost basis '{other}'"
+
+instance : ToJson Cost where
+  toJson c := Json.mkObj [("nanoUsd", toJson c.nanoUsd), ("basis", toJson c.basis),
+    ("rateVersion", toJson c.rateVersion)]
+
+instance : FromJson Cost where
+  fromJson? j := do
+    return { nanoUsd := ← j.getObjValAs? Nat "nanoUsd"
+             basis := ← j.getObjValAs? CostBasis "basis"
+             rateVersion := ← j.getObjValAs? String "rateVersion" }
 
 instance : ToJson LLMResponse where
   toJson r := Json.mkObj ([("id", toJson r.id), ("model", toJson r.model), ("message", toJson r.message),
-    ("stopReason", toJson r.stopReason)] ++ optKV "usage" r.usage)
+    ("stopReason", toJson r.stopReason)] ++ optKV "usage" r.usage ++ optKV "cost" r.cost)
 
 instance : FromJson LLMResponse where
   fromJson? j := do
@@ -204,6 +228,7 @@ instance : FromJson LLMResponse where
              model := ← j.getObjValAs? Model "model"
              message := ← j.getObjValAs? Message "message"
              stopReason := ← j.getObjValAs? StopReason "stopReason"
-             usage := ← optVal? j "usage" }
+             usage := ← optVal? j "usage"
+             cost := ← optVal? j "cost" }
 
 end Leanllm

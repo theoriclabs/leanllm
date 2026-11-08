@@ -16,6 +16,10 @@ name = "Leanllm"
 name = "leanllm"
 root = "Main"
 
+[[lean_lib]]
+name = "LeanllmTests"
+roots = ["LeanllmTests.Baseline", "LeanllmTests.Golden", "LeanllmTests.Structured", "LeanllmTests.Replay"]
+
 [[lean_exe]]
 name = "leanllm-tests"
 root = "LeanllmTests"

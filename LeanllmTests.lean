@@ -1,217 +1,270 @@
 import Leanllm
+import LeanllmTests.Structured
+import LeanllmTests.Replay
 
-/-! Offline tests: no network, no API keys. Run with `lake test`. -/
+/-!
+Offline tests for usage decoding and cost (theoriclabs/leanllm#1). No network, no API keys:
+every response below is a fixed JSON payload shaped like the provider's documented response
+object (usage values chosen so each subset and tier is exercised).
+-/
 
-open Leanllm
-open Lean (Json ToJson FromJson toJson fromJson?)
+open Leanllm Lean
 
-/-- Compare call results (`Except` has no `BEq`). -/
-def sameRes (a b : Except LLMError LLMResponse) : Bool :=
-  match a, b with
-  | .ok x,    .ok y    => x == y
-  | .error e, .error f => e == f
-  | _,        _        => false
+namespace LeanllmTests
 
-structure Counts where
+structure Results where
   passed : Nat := 0
-  failed : Nat := 0
+  failed : List String := []
 
-def check (ref : IO.Ref Counts) (label : String) (ok : Bool) (detail : String := "") : IO Unit := do
+abbrev TestM := StateT Results IO
+
+def check (name : String) (ok : Bool) (detail : String := "") : TestM Unit := do
   if ok then
-    ref.modify fun c => { c with passed := c.passed + 1 }
+    modify fun r => { r with passed := r.passed + 1 }
   else
-    ref.modify fun c => { c with failed := c.failed + 1 }
-    IO.eprintln s!"FAIL: {label}{if detail.isEmpty then "" else s!" ({detail})"}"
+    IO.eprintln s!"FAIL: {name} {detail}"
+    modify fun r => { r with failed := r.failed ++ [name] }
 
-/-! ## SHA-256 -/
+def checkEq [BEq α] [Repr α] (name : String) (actual expected : α) : TestM Unit :=
+  check name (actual == expected) s!"\n  expected: {repr expected}\n  actual:   {repr actual}"
 
-def shaTests (r : IO.Ref Counts) : IO Unit := do
-  let vectors : List (String × String) := [
-    ("", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
-    ("abc", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
-    ("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
-      "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"),
-    ("The quick brown fox jumps over the lazy dog",
-      "d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592"),
-    ("".pushn 'a' 55, "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318"),
-    ("".pushn 'a' 64, "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"),
-    ("".pushn 'a' 1000, "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3"),
-    ("héllo ✓", "5657cdef8a85a584e0e961e6f8247cf5d3f8ed21496ed6fdbcfd43a761e94245")
-  ]
-  for (input, expected) in vectors do
-    let got := Sha256.hexOfString input
-    check r s!"sha256 of {input.length}-char input" (got == expected) got
+def parse! (s : String) : Json :=
+  match Json.parse s with
+  | .ok j => j
+  | .error e => panic! s!"bad fixture JSON: {e}"
 
-/-! ## Canonical JSON -/
+def apiKeyAuth : ResolvedAuth := .apiKey "test-key-not-real"
+def claudeOAuthAuth : ResolvedAuth := .claudeOAuth { accessToken := "test-token-not-real" }
 
-def canonicalTests (r : IO.Ref Counts) : IO Unit := do
-  let a := Replay.canonicalizeText "{\"b\":1,\"a\":{\"d\":[1,2],\"c\":\"x\"}}"
-  let b := Replay.canonicalizeText "{ \"a\" : { \"c\":\"x\",\n \"d\":[ 1, 2 ] },\t\"b\": 1 }"
-  check r "canonical: key order and whitespace ignored" (a.toOption == b.toOption && a.isOk)
-  check r "canonical: exact text" (a.toOption == some "{\"a\":{\"c\":\"x\",\"d\":[1,2]},\"b\":1}")
-    (toString (repr a.toOption))
-  let built1 := Json.mkObj [("z", 1), ("y", Json.mkObj [("q", "é\"\n"), ("p", Json.null)])]
-  let built2 := Json.mkObj [("y", Json.mkObj [("p", Json.null), ("q", "é\"\n")]), ("z", 1)]
-  check r "canonical: constructed objects" (Replay.canonicalString built1 == Replay.canonicalString built2)
-  check r "canonical: trailing fractional zeros" ((Replay.canonicalizeText "[1.50]").toOption == (Replay.canonicalizeText "[1.5]").toOption)
+/-- Decode `json` with `cfg`'s wire API and attach the cost, as `callWithSession` does. -/
+def decodeAndCost (cfg : ModelConfig) (json : String) (auth : ResolvedAuth := apiKeyAuth) :
+    TestM (Option LLMResponse) := do
+  match Codec.decodeResponseWithAuth cfg (parse! json) (some auth) with
+  | .ok resp => return some (resp.withCost cfg auth)
+  | .error e =>
+    check s!"decode {cfg.model}" false (repr e |>.pretty)
+    return none
 
-/-! ## JSON round-trips -/
+def cost (nanoUsd : Nat) (basis : CostBasis := .apiKey) : Option Cost :=
+  some { nanoUsd, basis, rateVersion := Pricing.priceTableVersion }
 
-def roundTrip [ToJson α] [FromJson α] [BEq α] (x : α) : Bool :=
-  match fromJson? (toJson x) with
-  | .ok y    => y == x
-  | .error _ => false
+/-! ## Anthropic Messages -/
 
-def jsonTests (r : IO.Ref Counts) : IO Unit := do
-  let parts : List ContentPart := [
-    .text "hi",
-    .image (.url "https://example.com/a.png"),
-    .image (.base64 "image/png" "AAAA"),
-    .toolCall { id := "c1", name := "get_weather", arguments := Json.mkObj [("city", "Paris")] },
-    .toolResult { toolCallId := "c1", content := "sunny", isError := true },
-    .thinking "hmm",
-    .thinking "hmm" (some "sig")
-  ]
-  for p in parts do
-    check r s!"round-trip ContentPart {repr p}" (roundTrip p)
-  for role in [Role.system, .developer, .user, .assistant, .tool] do
-    check r s!"round-trip Role {repr role}" (roundTrip role)
-  let msg : Message := { role := .assistant, content := parts, name := some "bot" }
-  check r "round-trip Message" (roundTrip msg)
-  for sr in [StopReason.endTurn, .maxTokens, .stopSequence none, .stopSequence (some "END"), .toolUse,
-             .contentFilter, .other "weird"] do
-    check r s!"round-trip StopReason {repr sr}" (roundTrip sr)
-  let u : Usage := { inputTokens := 10, outputTokens := 5, cacheReadTokens := some 3, reasoningTokens := some 1 }
-  check r "round-trip Usage" (roundTrip u)
-  let models : List Model := [.claude .sonnet5_5, .claude (.custom "claude-x"), .openai .gpt4oMini,
-    .gemini .flash3_5, .kimi .forCoding, .glm (.custom "glm-z"), .mistral (.custom "m"),
-    .deepseek (.custom "d"), .qwen (.custom "q"), .minimax (.custom "mm"), .grok (.custom "g")]
-  for m in models do
-    check r s!"round-trip Model {m}" (roundTrip m)
-  -- An unknown (e.g. renamed) variant falls back to `.custom id`.
-  let renamed := Json.mkObj [("family", "claude"), ("id", "claude-old"), ("variant", "noSuchModel")]
-  check r "Model: unknown variant falls back to custom"
-    ((fromJson? renamed : Except String Model).toOption == some (.claude (.custom "claude-old")))
-  let resp : LLMResponse := { id := "r1", model := .claude .haiku5_5, message := msg,
-                              stopReason := .toolUse, usage := some u }
-  check r "round-trip LLMResponse" (roundTrip resp)
-  check r "round-trip LLMResponse without usage" (roundTrip { resp with usage := none })
-
-/-! ## Request hash -/
-
-def baseCfg : ModelConfig := { model := .claude .sonnet5_5, maxTokens := some 64 }
-
-def hashOf (cfg : ModelConfig) (msgs : List Message) : String :=
-  (Replay.requestHash cfg msgs).toOption.getD "<error>"
-
-def hashTests (r : IO.Ref Counts) : IO Unit := do
-  let msgs := [Message.system "Be brief.", Message.user "Hello"]
-  let h := hashOf baseCfg msgs
-  check r "hash: 64 hex chars" (h.length == 64) h
-  check r "hash: deterministic" (h == hashOf baseCfg msgs)
-  check r "hash: excludes apiKey and auth mode"
-    (h == hashOf { baseCfg with apiKey := some "sk-test-not-a-real-key", auth := .apiKey (some "sk-other") } msgs)
-  check r "hash: excludes bearer token" (h == hashOf { baseCfg with auth := .bearer "tok" } msgs)
-  let br1 : ModelConfig := { baseCfg with provider := .bedrock {} }
-  let br2 : ModelConfig := { baseCfg with provider := .bedrock { accessKeyId := some "AKIA-TEST", secretAccessKey := some "s" } }
-  check r "hash: excludes provider credentials" (hashOf br1 msgs == hashOf br2 msgs)
-  check r "hash: provider matters" (h != hashOf br1 msgs)
-  check r "hash: prompt matters" (h != hashOf baseCfg [Message.system "Be brief.", Message.user "Hello!"])
-  check r "hash: model matters" (h != hashOf { baseCfg with model := .claude .haiku5_5 } msgs)
-  check r "hash: parameters matter" (h != hashOf { baseCfg with temperature := some 0.5 } msgs)
-  check r "hash: base URL host matters" (h != hashOf { baseCfg with baseUrl := some "http://localhost:8080" } msgs)
-  check r "hash: tools matter"
-    (h != hashOf { baseCfg with tools := [{ name := "t", description := "d" }] } msgs)
-  check r "urlHost" (Replay.urlHost "https://user:pw@API.Example.com:8443/v1/x?key=1" == "api.example.com:8443")
-
-/-! ## Record / replay -/
-
-/-- A mocked provider: echoes the last user message; counts calls. -/
-def mockInner (calls : IO.Ref Nat) : Caller := fun cfg msgs => do
-  calls.modify (· + 1)
-  let n ← calls.get
-  let lastUser := (msgs.filter (·.role == .user)).getLast?.map (fun m =>
-    String.intercalate "" (m.content.filterMap fun | .text t => some t | _ => none)) |>.getD ""
-  return .ok {
-    id := s!"mock-{n}", model := cfg.model
-    message := { role := .assistant, content := [.text s!"echo: {lastUser}"] }
-    stopReason := .endTurn, usage := some { inputTokens := n, outputTokens := 2 * n }
+def anthropicJson : String := "{
+  \"id\": \"msg_test\", \"type\": \"message\", \"role\": \"assistant\",
+  \"content\": [{\"type\": \"text\", \"text\": \"hi\"}],
+  \"stop_reason\": \"end_turn\",
+  \"usage\": {
+    \"input_tokens\": 50,
+    \"cache_creation_input_tokens\": 1000,
+    \"cache_read_input_tokens\": 2000,
+    \"cache_creation\": {\"ephemeral_5m_input_tokens\": 400, \"ephemeral_1h_input_tokens\": 600},
+    \"output_tokens\": 300,
+    \"output_tokens_details\": {\"thinking_tokens\": 120}
   }
+}"
 
-def failingInner : Caller := fun _ _ =>
-  return .error (.provider .overloaded "mock overloaded")
+def testAnthropic : TestM Unit := do
+  let cfg : ModelConfig := { model := .claude .sonnet5_5 }
+  let some resp ← decodeAndCost cfg anthropicJson | return
+  -- input_tokens excludes cache reads/writes: 50 + 2000 + 1000.
+  checkEq "anthropic usage" resp.usage (some {
+    inputTokens := 3050, outputTokens := 300, cacheReadTokens := some 2000,
+    cacheWriteTokens := some 1000, cacheWriteLongTtlTokens := some 600, reasoningTokens := some 120 })
+  -- Sonnet 5.5: 50*2000 + 2000*100 + 400*2500 + 600*4000 + 300*10000 (thinking already in output)
+  checkEq "anthropic cost" resp.cost (cost 6700000)
+  -- Same usage via Claude subscription OAuth: list-price equivalent.
+  let some sub ← decodeAndCost cfg anthropicJson claudeOAuthAuth | return
+  checkEq "anthropic subscription cost" sub.cost (cost 6700000 .subscription)
 
-def replayTests (r : IO.Ref Counts) : IO Unit := IO.FS.withTempDir fun dir => do
-  let calls ← IO.mkRef 0
-  let recorder := Recorder.wrap dir (mockInner calls)
-  let turn1 := [Message.system "Be brief.", Message.user "What is Lean?"]
-  let resp1 ← recorder baseCfg turn1
-  let turn2 := turn1 ++ [Message.assistant "A prover.", Message.user "And Lake?"]
-  let resp2 ← recorder baseCfg turn2
-  let cfg2 : ModelConfig := { model := .openai .gpt4oMini, temperature := some 0.2 }
-  let resp3 ← recorder cfg2 [Message.user "Hi"]
-  check r "record: inner called 3 times" ((← calls.get) == 3)
-  let files := (← dir.readDir).filter (·.fileName.endsWith ".json")
-  check r "record: 3 record files" (files.size == 3) s!"{files.size}"
-  check r "record: file named by hash"
-    (← (Replay.recordPath dir (hashOf baseCfg turn1)).pathExists)
+def testAnthropicNoCache : TestM Unit := do
+  let cfg : ModelConfig := { model := .claude .haiku4_5 }
+  let some resp ← decodeAndCost cfg "{\"content\": [], \"usage\": {\"input_tokens\": 10, \"output_tokens\": 20}}" | return
+  checkEq "anthropic plain usage" resp.usage (some { inputTokens := 10, outputTokens := 20 })
+  checkEq "anthropic plain cost" resp.cost (cost (10 * 1000 + 20 * 5000))
 
-  -- Replay with no inner caller at all: nothing but file reads.
-  let replayer := Replayer.caller dir
-  let rep1 ← replayer baseCfg turn1
-  let rep2 ← replayer baseCfg turn2
-  let rep3 ← replayer cfg2 [Message.user "Hi"]
-  check r "replay: identical response 1" (sameRes rep1 resp1 && resp1.isOk)
-  check r "replay: identical response 2" (sameRes rep2 resp2 && resp2.isOk)
-  check r "replay: identical response 3" (sameRes rep3 resp3 && resp3.isOk)
-  check r "replay: inner not called" ((← calls.get) == 3)
-  -- Credentials do not affect lookup.
-  let repKey ← replayer { baseCfg with apiKey := some "sk-test-not-a-real-key" } turn1
-  check r "replay: apiKey does not change lookup" (sameRes repKey resp1)
+/-- Claude Haiku 5.5 bills the whole request at the higher tier once the prompt (counting cache
+    reads and writes) is over 100,000 tokens. -/
+def testHaikuLongContext : TestM Unit := do
+  let cfg : ModelConfig := { model := .claude .haiku5_5 }
+  let json (input : Nat) := s!"\{\"content\": [], \"usage\": \{\"input_tokens\": {input}, \"cache_read_input_tokens\": 60000, \"output_tokens\": 100}}"
+  let some short ← decodeAndCost cfg (json 40000) | return
+  checkEq "haiku 5.5 short tier" short.cost (cost (40000 * 100 + 60000 * 10 + 100 * 500))
+  let some long ← decodeAndCost cfg (json 40001) | return
+  checkEq "haiku 5.5 long tier" long.cost (cost (40001 * 500 + 60000 * 50 + 100 * 2500))
 
-  -- Change one prompt: a typed miss naming the new hash.
-  let changed := [Message.system "Be brief.", Message.user "What is Lean 4?"]
-  let newHash := hashOf baseCfg changed
-  match ← replayer baseCfg changed with
-  | .ok _ => check r "miss: changed prompt is an error" false "got a response"
-  | .error err =>
-    check r "miss: isReplayMiss names the new hash" (isReplayMiss err == some newHash) (toString (repr err))
-    let msg := match err with | .invalidRequest _ m => m | _ => ""
-    check r "miss: message names hash and model"
-      ((msg.splitOn newHash).length > 1 && (msg.splitOn baseCfg.effectiveModelId).length > 1) msg
-  check r "isReplayMiss: other errors" (isReplayMiss (.provider .overloaded "x") == none)
-  check r "isReplayMiss: plain malformedParameters"
-    (isReplayMiss (.invalidRequest (.malformedParameters "bad") "bad") == none)
+/-! ## OpenAI Chat Completions -/
 
-  -- A record with unknown fields (top-level and inside the response) still loads.
-  let path := Replay.recordPath dir (hashOf baseCfg turn1)
-  match Json.parse (← IO.FS.readFile path) with
-  | .error e => check r "forward-compat: parse record" false e
-  | .ok j =>
-    let resp := (j.getObjValD "response").setObjVal! "cost" (Json.mkObj [("totalUsd", toJson (0.001 : Float))])
-    let j' := (j.setObjVal! "response" resp).setObjVal! "futureField" (toJson [1, 2, 3])
-    IO.FS.writeFile path j'.pretty
-    check r "forward-compat: extra unknown fields still load" (sameRes (← replayer baseCfg turn1) resp1)
+def chatJson : String := "{
+  \"id\": \"chatcmpl-test\", \"object\": \"chat.completion\", \"model\": \"gpt-4o\",
+  \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"hi\"}, \"finish_reason\": \"stop\"}],
+  \"usage\": {
+    \"prompt_tokens\": 1200, \"completion_tokens\": 500, \"total_tokens\": 1700,
+    \"prompt_tokens_details\": {\"cached_tokens\": 1024, \"cache_write_tokens\": 0, \"audio_tokens\": 0},
+    \"completion_tokens_details\": {\"reasoning_tokens\": 200, \"audio_tokens\": 0}
+  }
+}"
 
-  -- Failed inner calls are returned unchanged and not recorded.
-  let failing := Recorder.wrap dir failingInner
-  let errRes ← failing baseCfg changed
-  check r "record: inner error passed through" (sameRes errRes (.error (.provider .overloaded "mock overloaded")))
-  check r "record: inner error not recorded" (!(← (Replay.recordPath dir newHash).pathExists))
+def testChat : TestM Unit := do
+  let cfg : ModelConfig := { model := .openai .gpt4o }
+  let some resp ← decodeAndCost cfg chatJson | return
+  checkEq "chat usage" resp.usage (some {
+    inputTokens := 1200, outputTokens := 500, cacheReadTokens := some 1024,
+    cacheWriteTokens := some 0, reasoningTokens := some 200 })
+  -- gpt-4o: (1200-1024)*2500 + 1024*1250 + 500*10000; cached and reasoning are subsets.
+  checkEq "chat cost" resp.cost (cost 6720000)
 
-  -- A corrupt record is a parse error, not a miss and not a reply.
-  IO.FS.writeFile (Replay.recordPath dir newHash) "{not json"
-  match ← replayer baseCfg changed with
-  | .error (.parse _ _) => check r "corrupt record: parse error" true
-  | other => check r "corrupt record: parse error" false (toString (repr other))
+/-! ## OpenAI Responses -/
+
+/-- Usage numbers from the prompt-caching guide's worked example. -/
+def responsesJson : String := "{
+  \"id\": \"resp_test\", \"object\": \"response\", \"status\": \"completed\",
+  \"output\": [{\"type\": \"message\", \"role\": \"assistant\", \"content\": [{\"type\": \"output_text\", \"text\": \"hi\"}]}],
+  \"usage\": {
+    \"input_tokens\": 12000,
+    \"input_tokens_details\": {
+      \"cached_tokens\": 4000, \"cache_write_tokens\": 7000,
+      \"cache_write_tokens_details\": {\"ttl_30m_tokens\": 3000, \"ttl_12h_tokens\": 4000}
+    },
+    \"output_tokens\": 800,
+    \"output_tokens_details\": {\"reasoning_tokens\": 300},
+    \"total_tokens\": 12800
+  }
+}"
+
+def testResponses : TestM Unit := do
+  let cfg : ModelConfig := { model := .openai .gpt5_6Terra, wireApi := .openaiResponses }
+  let some resp ← decodeAndCost cfg responsesJson | return
+  checkEq "responses usage" resp.usage (some {
+    inputTokens := 12000, outputTokens := 800, cacheReadTokens := some 4000,
+    cacheWriteTokens := some 7000, cacheWriteLongTtlTokens := some 4000, reasoningTokens := some 300 })
+  -- gpt-5.6-terra: 1000*2000 + 4000*200 + 3000*2500 + 4000*5000 + 800*12000
+  checkEq "responses cost" resp.cost (cost 39900000)
+  -- The guide's input-only formula at its $1 input price gives $0.01515; ours at $2 is double.
+  checkEq "responses input cost matches guide" (39900000 - 800 * 12000) (2 * 15150000)
+  -- Codex OAuth SSE path decodes `response.completed` with the same decoder.
+  checkEq "responses usage via SSE decoder" (Codec.decodeOpenAIResponsesUsage (parse! responsesJson)) resp.usage
+
+/-- gpt-5.5 has no 12h write price, so 12h writes cannot be priced: no guessing. -/
+def testResponsesUnpriceableWrite : TestM Unit := do
+  let cfg : ModelConfig := { model := .openai .gpt5_5, wireApi := .openaiResponses }
+  let some resp ← decodeAndCost cfg responsesJson | return
+  checkEq "responses 12h write without rate" resp.cost none
+
+def testResponsesLongContext : TestM Unit := do
+  let cfg : ModelConfig := { model := .openai .gpt5_4, wireApi := .openaiResponses }
+  let json := "{\"output\": [], \"usage\": {\"input_tokens\": 300000, \"input_tokens_details\": {\"cached_tokens\": 0}, \"output_tokens\": 10, \"output_tokens_details\": {\"reasoning_tokens\": 0}}}"
+  let some resp ← decodeAndCost cfg json | return
+  checkEq "gpt-5.4 long context cost" resp.cost (cost (300000 * 5000 + 10 * 22500))
+
+/-! ## Gemini -/
+
+def geminiJson : String := "{
+  \"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \"hi\"}]}, \"finishReason\": \"STOP\"}],
+  \"usageMetadata\": {
+    \"promptTokenCount\": 5000, \"cachedContentTokenCount\": 4000,
+    \"candidatesTokenCount\": 300, \"thoughtsTokenCount\": 700, \"totalTokenCount\": 6000
+  },
+  \"responseId\": \"gemini-test\"
+}"
+
+def testGemini : TestM Unit := do
+  let cfg : ModelConfig := { model := .gemini .flash3_8 }
+  let some resp ← decodeAndCost cfg geminiJson | return
+  -- thoughts are reported outside candidates: output = 300 + 700.
+  checkEq "gemini usage" resp.usage (some {
+    inputTokens := 5000, outputTokens := 1000, cacheReadTokens := some 4000, reasoningTokens := some 700 })
+  -- gemini-3.8-flash: 1000*750 + 4000*75 + 1000*3750
+  checkEq "gemini cost" resp.cost (cost 4800000)
+  -- Code Assist envelope with tool-use prompt tokens, via Gemini OAuth (subscription).
+  let wrapped := "{\"response\": {\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"x\"}]}}], \"usageMetadata\": {\"promptTokenCount\": 100, \"toolUsePromptTokenCount\": 50, \"candidatesTokenCount\": 10, \"totalTokenCount\": 160}}}"
+  let some w ← decodeAndCost cfg wrapped (.geminiOAuth { accessToken := "test-token-not-real" } "proj") | return
+  checkEq "gemini tool-use usage" w.usage (some { inputTokens := 150, outputTokens := 10 })
+  checkEq "gemini tool-use cost" w.cost (cost (150 * 750 + 10 * 3750) .subscription)
+
+def testGeminiLongContext : TestM Unit := do
+  let cfg : ModelConfig := { model := .gemini .pro2_5 }
+  let json := "{\"candidates\": [{\"content\": {\"parts\": []}}], \"usageMetadata\": {\"promptTokenCount\": 200001, \"candidatesTokenCount\": 1}}"
+  let some resp ← decodeAndCost cfg json | return
+  checkEq "gemini 2.5 pro long context cost" resp.cost (cost (200001 * 2500 + 15000))
+
+/-! ## Bedrock Converse -/
+
+def testBedrockConverse : TestM Unit := do
+  let cfg : ModelConfig := { model := .claude .sonnet4_5, provider := .bedrock {} }
+  let json := "{\"output\": {\"message\": {\"role\": \"assistant\", \"content\": [{\"text\": \"hi\"}]}}, \"stopReason\": \"end_turn\",
+    \"usage\": {\"inputTokens\": 100, \"outputTokens\": 20, \"totalTokens\": 620, \"cacheReadInputTokens\": 200, \"cacheWriteInputTokens\": 300,
+    \"cacheDetails\": [{\"ttl\": \"1h\", \"inputTokens\": 250}, {\"ttl\": \"5m\", \"inputTokens\": 50}]}}"
+  let some resp ← decodeAndCost cfg json | return
+  checkEq "bedrock usage" resp.usage (some {
+    inputTokens := 600, outputTokens := 20, cacheReadTokens := some 200,
+    cacheWriteTokens := some 300, cacheWriteLongTtlTokens := some 250 })
+  -- Bedrock has its own price list, not confirmed here.
+  checkEq "bedrock cost unknown" resp.cost none
+
+/-! ## No usage, no rate -/
+
+def testMissingUsage : TestM Unit := do
+  let cfg : ModelConfig := { model := .claude .sonnet5_5 }
+  let some resp ← decodeAndCost cfg "{\"content\": [{\"type\": \"text\", \"text\": \"hi\"}]}" | return
+  checkEq "missing usage" resp.usage none
+  checkEq "missing usage gives no cost" resp.cost none
+  -- The Codex SSE path builds a response with `usage := none` when no `response.completed` arrives.
+  let bare : LLMResponse := { id := "", model := .openai .gpt5_5, message := { role := .assistant, content := [] }, stopReason := .endTurn }
+  checkEq "SSE without completed event" (bare.withCost { model := .openai .gpt5_5 } (.openaiOAuth { accessToken := "t" })).cost none
+
+def testNoRate : TestM Unit := do
+  let some r1 ← decodeAndCost { model := .openai .o4Mini } chatJson | return
+  checkEq "unlisted model gives no cost" r1.cost none
+  let some r2 ← decodeAndCost { model := .openai (.custom "my-finetune") } chatJson | return
+  checkEq "custom model gives no cost" r2.cost none
+  let some r3 ← decodeAndCost { model := .openai .gpt4o, provider := .openRouter {} } chatJson | return
+  checkEq "reseller gives no cost" r3.cost none
+
+/-- OpenAI-compatible vendors share the Chat Completions decoder; spot-check their tables. -/
+def testOtherVendors : TestM Unit := do
+  let some glm ← decodeAndCost { model := .glm .glm5_3, provider := .zaiCoding } chatJson | return
+  -- Z.AI coding plan: list-price equivalent, (1200-1024)*1400 + 1024*260 + 500*4400
+  checkEq "glm-5.3 coding plan cost" glm.cost (cost (176 * 1400 + 1024 * 260 + 500 * 4400) .subscription)
+  let some grok ← decodeAndCost { model := .grok .grok4_7 } chatJson | return
+  checkEq "grok-4.7 cost" grok.cost (cost (176 * 2000 + 1024 * 500 + 500 * 6000))
+  -- xAI: a prompt that reaches 200k tokens is billed at the higher tier.
+  let big := "{\"choices\": [{\"message\": {\"role\": \"assistant\", \"content\": \"x\"}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 200000, \"completion_tokens\": 1}}"
+  let some grokLong ← decodeAndCost { model := .grok .grok4_7 } big | return
+  checkEq "grok-4.7 long context cost" grokLong.cost (cost (200000 * 4000 + 12000))
+  let some ds ← decodeAndCost { model := .deepseek .v4Pro } chatJson | return
+  checkEq "deepseek time-of-day pricing gives no cost" ds.cost none
+
+def testBasis : TestM Unit := do
+  checkEq "basis apiKey" (Pricing.costBasis .direct apiKeyAuth) .apiKey
+  checkEq "basis bearer" (Pricing.costBasis .direct (.bearer "t")) .apiKey
+  checkEq "basis coding plan" (Pricing.costBasis .zaiCoding apiKeyAuth) .subscription
+  checkEq "basis copilot" (Pricing.costBasis .copilot (.copilotBearer "t")) .subscription
+  checkEq "basis claude oauth" (Pricing.costBasis .direct claudeOAuthAuth) .subscription
+
+def all : TestM Unit := do
+  testAnthropic
+  testAnthropicNoCache
+  testHaikuLongContext
+  testChat
+  testResponses
+  testResponsesUnpriceableWrite
+  testResponsesLongContext
+  testGemini
+  testGeminiLongContext
+  testBedrockConverse
+  testMissingUsage
+  testNoRate
+  testOtherVendors
+  testBasis
+
+end LeanllmTests
 
 def main : IO UInt32 := do
-  let r ← IO.mkRef ({} : Counts)
-  shaTests r
-  canonicalTests r
-  jsonTests r
-  hashTests r
-  replayTests r
-  let c ← r.get
-  IO.println s!"leanllm-tests: {c.passed} passed, {c.failed} failed"
-  return if c.failed == 0 then 0 else 1
+  let ((), r) ← LeanllmTests.all.run {}
+  let (sPassed, sFailed) ← LeanllmTests.Structured.run
+  let (rPassed, rFailed) ← LeanllmTests.Replay.run
+  let passed := r.passed + sPassed + rPassed
+  let failed := r.failed ++ sFailed ++ rFailed
+  IO.println s!"leanllm-tests: {passed} passed, {failed.length} failed"
+  return if failed.isEmpty then 0 else 1

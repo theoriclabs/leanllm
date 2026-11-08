@@ -13,6 +13,8 @@ import Leanllm.Models
 import Leanllm.Message
 import Leanllm.Error
 import Leanllm.Response
+import Leanllm.Cost
+import Leanllm.Pricing
 import Leanllm.Auth
 import Leanllm.Auth.OpenAI
 import Leanllm.Auth.Claude
@@ -20,6 +22,7 @@ import Leanllm.Auth.Other
 import Leanllm.Codec
 import Leanllm.Transport
 import Leanllm.Basic
+import Leanllm.Structured
 import Leanllm.Sha256
 import Leanllm.ResponseJson
 import Leanllm.Replay

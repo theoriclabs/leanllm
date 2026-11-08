@@ -1,6 +1,7 @@
 import Leanllm.Provider
 import Leanllm.Message
 import Leanllm.Auth
+import Leanllm.ResponseFormat
 
 namespace Leanllm
 
@@ -16,6 +17,8 @@ structure ModelConfig where
   tools       : List ToolSpec := []
   apiKey      : Option String := none
   baseUrl     : Option String := none
+  /-- Ask for JSON output following a schema (see `Leanllm.Structured`). `none` leaves requests unchanged. -/
+  responseFormat : Option ResponseFormat := none
   deriving Repr, BEq, Inhabited
 
 namespace ModelConfig
