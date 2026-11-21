@@ -2,8 +2,8 @@
 
 **A unified LLM client library for Lean 4, backed by [LeanHttp](https://github.com/theoriclabs/leanhttp).**
 
-[![Release](https://img.shields.io/badge/release-v0.2.0-3178c6)](https://github.com/theoriclabs/leanllm/releases)
-[![Lean](https://img.shields.io/badge/Lean-v4.34.1-555555)](https://lean-lang.org)
+[![Release](https://img.shields.io/badge/release-v0.3.0-3178c6)](https://github.com/theoriclabs/leanllm/releases)
+[![Lean](https://img.shields.io/badge/Lean-v4.36.0-555555)](https://lean-lang.org)
 
 `leanllm` provides a single typed interface for Anthropic Claude, OpenAI, Google Gemini, DeepSeek, Kimi/Moonshot, Z.AI GLM, Qwen, MiniMax, xAI Grok, and Mistral models across direct vendor APIs, subscription OAuth sessions (Claude Code, OpenAI Codex/ChatGPT, Gemini Code Assist, Antigravity, GitHub Copilot, Grok Build), OpenRouter, AWS Bedrock, Azure OpenAI, Google Vertex AI, and local OpenAI-compatible servers.
 
@@ -15,10 +15,10 @@ Add `leanllm` to your `lakefile.toml`:
 [[require]]
 name = "leanllm"
 git = "https://github.com/theoriclabs/leanllm"
-rev = "v0.2.0"
+rev = "v0.3.0"
 ```
 
-Requires Lean `v4.34.1` and `libcurl` at runtime (loaded dynamically by `leanhttp`).
+Requires Lean `v4.36.0` and `libcurl` at runtime (loaded dynamically by `leanhttp`).
 
 ## Quick start
 
