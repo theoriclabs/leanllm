@@ -7,7 +7,7 @@ testDriver = "«leanllm-tests»"
 [[require]]
 name = "leanhttp"
 git = "https://github.com/theoriclabs/leanhttp"
-rev = "v0.6.0"
+rev = "v0.8.0"
 
 [[lean_lib]]
 name = "Leanllm"
